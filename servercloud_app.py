@@ -40,9 +40,11 @@ from servercloud.modules.cpts_api import (CptsStore, CptsClient,
                                        validate_key as cpts_valid_key)  # noqa: E402
 from servercloud.utils.colors import (banner, c, GREEN, YELLOW, RED, MAGENTA,
                                       BOLD, CYAN, DIM)                  # noqa: E402
-from servercloud.os import (trk, truck_init, truck_boot, truck_shell,
-                            truck_kernel, truck_syscall)               # noqa: E402
-from servercloud.os.sysconfig import SysConfig                          # noqa: E402
+from servercloud.truck_modules import trk                                # noqa: E402
+from servercloud.truck_modules.sysconfig import SysConfig                  # noqa: E402
+from servercloud.kernel import (truck_init, truck_boot,                    # noqa: E402
+                                truck_kernel, truck_syscall)
+from servercloud.os import truck_shell                                    # noqa: E402
 from servercloud.os.scriptlib import ScriptLibrary                      # noqa: E402
 
 # NOTE: SERVERCLOUD_HOME is used by scripts/install.sh as the *checkout* dir.

@@ -308,6 +308,19 @@ ServerCloud/
     │   ├── llm.py            # Ollama /api/chat client, JSON-mode fallback
     │   ├── permissions.py    # confirm-before-write policy
     │   └── config.py         # ~/.servercloud data dir, GH token storage
+    ├── kernel/               # 🚚 TruckOS kernel space (simulated ring 0)
+    │   ├── truck_kernel.py   # microkernel: e820 memmap, page allocator,
+    │   │                     # slab kmalloc, VM/TLB, CFS-like scheduler,
+    │   │                     # timer IRQ, /proc & /sys, panic handler
+    │   ├── truck_syscall.py  # int 0x80 gate — numbered syscall table
+    │   ├── truck_boot.py     # bootloader: POST, GRUB-style menu, runlevels
+    │   └── truck_init.py     # PID 1 — service supervisor
+    ├── truck_modules/        # 🧩 TruckOS kernel modules & daemons
+    │   ├── trk.py            # 'trk' package manager (install/remove/...)
+    │   └── sysconfig.py      # persistent system configuration store
+    ├── os/                   # 🖥️ TruckOS userland shells
+    │   ├── truck_shell.py    # Terminal / LLM Local / Script Library / Settings
+    │   └── scriptlib.py      # script library backing store
     └── utils/
         └── colors.py         # ANSI colors + startup banner
 ```

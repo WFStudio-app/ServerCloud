@@ -345,7 +345,7 @@ def cmd_kernel(args):
     subcommands: info | ps | dmesg | vmstat | syscalls | cat <procpath>
     All access goes through the int 0x80 syscall gate (truck_syscall).
     """
-    from servercloud.os import truck_kernel, truck_syscall
+    from servercloud.kernel import truck_kernel, truck_syscall
     k = truck_kernel.default_kernel()
     if k.state != "running":
         print("trk kernel: no kernel is running (boot via truck_boot first).")
