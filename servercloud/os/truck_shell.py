@@ -193,23 +193,165 @@ def _input(prompt):
         return ""
 
 
+# ------------------------------------------------------------ AUTO-UPDATE
+REASON_LABEL = {
+    "security_update": "urgent security update",
+    "vulnerability_found": "vulnerability found & fixed",
+    "critical_bug_fix": "critical bug fix",
+}
+
+
+def _flag(r):
+    """Red [!] urgent flag + short status line."""
+    mark = c("[!]", RED + BOLD) + " " if r.get("urgent") else ""
+    return mark
+
+
+def _show_os_check(r):
+    if not r.get("ok"):
+        print(c(f"  check failed: {r.get('error', 'unknown error')}", RED))
+        return
+    print(BOLD + f"\n  OS UPDATE CHECK — {r['owner']}/{r['repo']}@{r['branch']}"
+          + "\033[0m")
+    print(f"  installed version : ServerCloud {r['installed_version']}")
+    print(_flag(r) + BOLD + f"latest push: {r['title']}" + "\033[0m")
+    print(f"  commit            : {r['short_sha']}  by {r['author']}  {r['date']}")
+    body = [l for l in r["message"].splitlines()[1:] if l.strip()]
+    if body:
+        print(DIM + "  what changed (commit message):" + "\033[0m")
+        for l in body[:8]:
+            print(DIM + f"    {l}" + "\033[0m")
+    print(f"  files in push     : {r['changed_files']}"
+          + ("  (kernel)" if r["touches_kernel"] else "")
+          + ("  (security)" if r["touches_security"] else ""))
+    if r["release"]:
+        rel = r["release"]
+        pre = " [pre-release]" if rel["prerelease"] else ""
+        print(f"  release with this push : YES — {rel['tag']} “{rel['name']}”{pre}")
+    else:
+        print("  release with this push : no")
+    if r["urgent"]:
+        print(c(f"  urgency           : URGENT — "
+                f"{REASON_LABEL.get(r['urgent_reason'], r['urgent_reason'])}",
+                RED + BOLD))
+    else:
+        print(c("  urgency           : routine", GREEN))
+
+
+def _show_kernel_check(r):
+    if not r.get("ok"):
+        print(c(f"  check failed: {r.get('error', 'unknown error')}", RED))
+        return
+    print(BOLD + f"\n  KERNEL UPDATE CHECK — markers in {r['owner']}/{r['repo']}"
+          "@main" + "\033[0m")
+    print(f"  installed kernel build  : {r['installed_kernel']} "
+          f"(release marker {r['installed_release_version']})")
+    print(f"  kernel version on GitHub: {r['remote_version']}  ({r['date']})")
+    print(_flag(r) + "update available      : "
+          + ("YES" if r["available"] else "no — up to date"))
+    if r["urgent"]:
+        print(c(f"  urgency               : URGENT — "
+                f"{REASON_LABEL.get(r['urgent_reason'], '?')}", RED + BOLD))
+    else:
+        print("  urgency               : normal")
+    sec_line = ("  contains security fixes : " + c("YES", GREEN + BOLD)
+                if r["has_security_fixes"] else
+                "  contains security fixes : no")
+    print(sec_line)
+    print(f"  written in              : {r['languages']}")
+    print(DIM + f"  description             : {r['description']}" + "\033[0m")
+
+
+def _show_security_check(r):
+    if not r.get("ok"):
+        print(c(f"  check failed: {r.get('error', 'unknown error')}", RED))
+        return
+    print(BOLD + f"\n  SECURITY UPDATE CHECK — {r['owner']}/{r['repo']}"
+          "/servercloud/security" + "\033[0m")
+    print(f"  installed ruleset   : {r['installed_db']}")
+    print(f"  latest ruleset      : {r['remote_version']}  ({r['date']})")
+    print(_flag(r) + "update available    : "
+          + ("YES" if r["available"] else "no — current"))
+    sev_col = {"critical": RED + BOLD, "high": RED,
+               "moderate": YELLOW, "low": GREEN}.get(r["severity"], DIM)
+    print("  severity            : " + c(r["severity"], sev_col))
+    if r["urgent"]:
+        print(c(f"  urgency             : URGENT — "
+                f"{REASON_LABEL.get(r['urgent_reason'], r['urgent_reason'])}",
+                RED + BOLD))
+    print(DIM + f"  changelog           : {r['description']}" + "\033[0m")
+
+
+def auto_update_section(app):
+    from servercloud.truck_modules import truck_update
+    cfg = app.sysconfig
+    print(c("Auto-Update — TruckOS checks the GitHub repo; nothing is "
+            "applied without confirmation.", YELLOW))
+    last = {}
+    while True:
+        print("\n  [1] Check OS Updates    [2] Kernel Update    "
+              "[3] Security Update")
+        print("  a) run all checks | apply os|kernel|security | back")
+        line = _line(CYAN).lower()
+        if line in ("back", "exit", "quit", ""):
+            return
+        try:
+            if line in ("1", "check os"):
+                last["os"] = truck_update.check_os_updates(cfg)
+                _show_os_check(last["os"])
+            elif line in ("2", "kernel"):
+                last["kernel"] = truck_update.check_kernel_update(cfg)
+                _show_kernel_check(last["kernel"])
+            elif line in ("3", "security"):
+                last["sec"] = truck_update.check_security_update(cfg)
+                _show_security_check(last["sec"])
+            elif line == "a":
+                last["os"] = truck_update.check_os_updates(cfg)
+                _show_os_check(last["os"])
+                last["kernel"] = truck_update.check_kernel_update(cfg)
+                _show_kernel_check(last["kernel"])
+                last["sec"] = truck_update.check_security_update(cfg)
+                _show_security_check(last["sec"])
+            elif line.startswith("apply "):
+                kind = line.split(maxsplit=1)[1].strip()
+                kind = {"os-updates": "os", "updates": "os",
+                        "sec": "security"}.get(kind, kind)
+                if kind not in ("os", "kernel", "security"):
+                    print(c("usage: apply os | apply kernel | apply security",
+                            YELLOW))
+                    continue
+                if _confirm(f"  pull '{kind}' update from GitHub? [y/N] "):
+                    print(truck_update.apply_update(kind, cfg, yes=True))
+            else:
+                print(c("unknown option.", RED))
+        except Exception as e:  # network/JSON safety net — never crash menu
+            print(c(f"auto-update: {e}", RED))
+
+
 # ------------------------------------------------------------ SETTINGS
 def settings_shell(app):
     cfg = app.sysconfig
     print(c("TruckOS Settings — changes are saved immediately.", YELLOW))
     while True:
         cur = cfg.all()
+        print(BOLD + "\n== Auto-Update ==" + "\033[0m")
+        print("  [u] open Auto-Update section:")
+        print("      1. Check OS Updates   2. Kernel Update   "
+              "3. Security Update")
         print(BOLD + "\nCurrent configuration:" + "\033[0m")
         for k in ("hostname", "runlevel", "boot_timeout_sec", "require_trust",
                   "ollama_bin", "api_port", "tps_cap",
                   "kernel_ram_mb", "kernel_ncpu", "kernel_hz"):
             print(f"  {k:<16} = {cur.get(k)}")
-        print("\n  set <key> <value> | trk <args> | services | kernel | "
-              "reset | back")
+        print("\n  auto-update | set <key> <value> | trk <args> | services | "
+              "kernel | reset | back")
         line = _line(MAGENTA)
         low = line.lower()
         if low in ("back", "exit", "quit", ""):
             return
+        if low in ("u", "auto-update", "auto update", "autoupdate"):
+            auto_update_section(app)
+            continue
         if low == "services":
             app.init_main(["status"])
             continue

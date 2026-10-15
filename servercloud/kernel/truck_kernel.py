@@ -26,7 +26,7 @@ import time
 
 # ------------------------------------------------------------------ constants
 KERNEL_NAME = "TruckOS Kernel"
-KERNEL_VERSION = "1.0.0-truck"
+KERNEL_VERSION = "2.0.3-truck"
 KERNEL_BUILDOPT = "SMP PREEMPT LOCALSIM"
 
 PAGE_SHIFT = 12                 # 4 KiB pages, like x86_64 Linux

@@ -317,9 +317,16 @@ ServerCloud/
     │   └── truck_init.py     # PID 1 — service supervisor
     ├── truck_modules/        # 🧩 TruckOS kernel modules & daemons
     │   ├── trk.py            # 'trk' package manager (install/remove/...)
-    │   └── sysconfig.py      # persistent system configuration store
+    │   ├── sysconfig.py      # persistent system configuration store
+    │   ├── update_markers.py # version marker files (.data) parser/helpers
+    │   └── truck_update.py   # Auto-Update service (GitHub checks, apply)
+    ├── security/             # 🔐 security database + release marker
+    │   └── SECURITY.data     # urgency / severity / changelog of ruleset
     ├── os/                   # 🖥️ TruckOS userland shells
     │   ├── truck_shell.py    # Terminal / LLM Local / Script Library / Settings
+    │   │                     #   Settings starts with "Auto-Update":
+    │   │                     #   1. Check OS Updates 2. Kernel Update
+    │   │                     #   3. Security Update (red [!] when urgent)
     │   └── scriptlib.py      # script library backing store
     └── utils/
         └── colors.py         # ANSI colors + startup banner
