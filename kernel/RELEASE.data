@@ -1,8 +1,8 @@
 # TruckOS kernel release marker (checked by Settings -> Auto-Update)
-version = 2.0.3-truck
+version = 2.1.0-truck
 urgent = false
 urgent_reason =
 security = true
-languages = Python 3 (stdlib only)
-description = Hardened syscall gate: errno-only error paths, mmap/slab/fork limits, init kill protection, trk path-traversal fixes, boot-config bounds.
+languages = Python 3 (stdlib only); porting layer: pure Python, AST language probe
+description = Kernel v2.1.0 expansion: in-kernel VFS/tmpfs (256K/file cap, traversal-safe), POSIX signal registry (SIGKILL/SIGSTOP unblockable, init immortal), futex table, soft watchdog, syscall numbers 30-33. Cross-platform porting layer: HAL abstraction (page size / ABI / display / net backends), certified port matrix of 20 targets (20 phones incl. Pixel/Galaxy/Xiaomi/OnePlus/Moto/Sony/Nothing/iPhone + Steam Deck handhelds) across 3 primary vendor families (Google/truckdroid, Apple/truckapple, Valve/truckdeck), host auto-detection at boot, and scaffold_port() templates for growing the matrix further. Security carried over from 2.0.3: errno-only error paths, no user-callable panic, memory/fork limits.
 date = 2026-10-16

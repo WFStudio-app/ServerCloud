@@ -76,8 +76,15 @@ def _python_flavours(files):
 
 
 def kernel_languages(kernel_dir=None):
-    """Return {'Python': {...}, ...} plus implementation notes."""
-    root = kernel_dir or os.path.dirname(os.path.abspath(__file__))
+    """Return {'Python': {...}, ...} plus implementation notes.
+
+    Defaults to the whole kernel/ tree (core + porting layer), not just
+    the directory this probe lives in.
+    """
+    if kernel_dir is None:
+        here = os.path.dirname(os.path.abspath(__file__))     # kernel/porting
+        kernel_dir = os.path.dirname(here)                     # kernel/
+    root = kernel_dir
     langs, files = _scan_dir(root)
     notes = _python_flavours(files)
     return {"languages": langs, "implementation_notes": notes,

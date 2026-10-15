@@ -123,8 +123,9 @@ def scaffold_port(target_id, name=None, vendor="community",
     """Create ports/<vendor>/<target_id>/ scaffold. Returns its path."""
     if target_id in _TEMPLATES or target_id in ("..", "."):
         raise ValueError(f"reserved/invalid target id: {target_id!r}")
-    if not all(c.isalnum() or c in "-_." for c in target_id):
-        raise ValueError("target id may contain only letters/digits/-/_/.")
+    if not target_id or not all(c.isalnum() or c in "-_." for c in target_id):
+        raise ValueError("target id must be non-empty and contain only "
+                         "letters/digits/-/_.")
     if PORT_MATRIX.find(target_id):
         raise ValueError(f"target already certified: {target_id}")
     tpl = _TEMPLATES.get(template)

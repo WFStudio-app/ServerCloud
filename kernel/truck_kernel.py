@@ -578,15 +578,31 @@ class TmpFs:
             if child is None:
                 if not create_dirs:
                     raise FileNotFoundError("/".join([""] + parts))   # ENOENT
-                child = Inode(is_dir=(i < len(parts) - 1))
+                # every created intermediate must be a directory;
+                # the leaf stays a dir only if caller treats it as one
+                child = Inode(is_dir=True) if i < len(parts) - 1 \
+                    else Inode(is_dir=False)
                 node.children[name] = child
+            elif i < len(parts) - 1 and not child.is_dir:
+                raise KernelFault(-20, f"{name}: not a directory")   # ENOTDIR
             node = child
         return node
+
+    def mkdir(self, path):
+        """Explicitly create a directory node (used by init/services)."""
+        node = self._walk(self._split(path), create_dirs=True)
+        if not node.is_dir:
+            node.is_dir, node.data, node.children = True, None, {}
+        return True
 
     def write(self, path, data):
         parts = self._split(path)
         leaf = parts[-1]
+        # every intermediate component must be a directory: auto-convert
+        # a file node that got in the way instead of corrupting state
         parent = self._walk(parts[:-1], create_dirs=True)
+        if not parent.is_dir:
+            parent.is_dir, parent.data, parent.children = True, None, {}
         if parent.children is None:
             raise KernelFault(-20, "tmpfs: not a directory")
         node = parent.children.get(leaf)
