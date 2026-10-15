@@ -244,8 +244,13 @@ def _show_os_check(r):
     print(BOLD + f"\n  OS UPDATE CHECK — {r['owner']}/{r['repo']}@{r['branch']}"
           + "\033[0m")
     print(f"  installed version : ServerCloud {r['installed_version']}")
-    print(_flag(r) + BOLD + f"latest push: {r['title']}" + "\033[0m")
+    if r.get("available"):
+        print(_flag(r) + BOLD + f"latest push: {r['title']} [NEW]" + "\033[0m")
+    else:
+        print(_flag(r) + BOLD + f"latest push: {r['title']}" + "\033[0m")
     print(f"  commit            : {r['short_sha']}  by {r['author']}  {r['date']}")
+    print("  update available  : "
+          + (c("YES", GREEN + BOLD) if r.get("available") else "no — up to date"))
     body = [l for l in r["message"].splitlines()[1:] if l.strip()]
     if body:
         print(DIM + "  what changed (commit message):" + "\033[0m")
@@ -312,6 +317,40 @@ def _show_security_check(r):
     print(DIM + f"  changelog           : {r['description']}" + "\033[0m")
 
 
+KIND_NAME = {"os": "OS", "kernel": "KERNEL", "security": "SECURITY"}
+
+
+def _offer_install(truck_update, cfg, kind, result):
+    """If a check found an available update, immediately offer to install it.
+
+    Returns True when an install was attempted (caller may pause afterwards).
+    """
+    if not (isinstance(result, dict) and result.get("ok")
+            and result.get("available")):
+        return False
+    urgent = bool(result.get("urgent"))
+    name = KIND_NAME.get(kind, kind)
+    print()
+    if urgent:
+        print(c("  [!] URGENT UPDATE AVAILABLE — recommended to install now",
+                RED + BOLD))
+    else:
+        print(c("  >> UPDATE AVAILABLE — install it now?", GREEN + BOLD))
+    prompt = ("  install %s update now? [y/N]: " % name if not urgent else
+              "  install %s update NOW? [Y/n]: " % name)
+    try:
+        ans = input(c(prompt, YELLOW)).strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        ans = ""
+    default_yes = urgent
+    if ans in ("y", "yes") or (ans == "" and default_yes):
+        print()
+        print(truck_update.apply_update(kind, cfg, yes=True))
+        return True
+    print(c(f"  skipped — you can still run: apply {kind}", DIM))
+    return False
+
+
 def auto_update_section(app):
     from truck.modules import update_engine as truck_update
     cfg = app.sysconfig
@@ -332,22 +371,35 @@ def auto_update_section(app):
         if line in ("back", "exit", "quit", "", "0"):
             return
         try:
+            installed = False
             if line in ("1", "check os"):
                 last["os"] = truck_update.check_os_updates(cfg)
                 _show_os_check(last["os"])
+                installed = _offer_install(truck_update, cfg, "os", last["os"])
             elif line in ("2", "kernel"):
                 last["kernel"] = truck_update.check_kernel_update(cfg)
                 _show_kernel_check(last["kernel"])
+                installed = _offer_install(truck_update, cfg, "kernel",
+                                           last["kernel"])
             elif line in ("3", "security"):
                 last["sec"] = truck_update.check_security_update(cfg)
                 _show_security_check(last["sec"])
+                installed = _offer_install(truck_update, cfg, "security",
+                                           last["sec"])
             elif line == "a":
-                last["os"] = truck_update.check_os_updates(cfg)
-                _show_os_check(last["os"])
-                last["kernel"] = truck_update.check_kernel_update(cfg)
-                _show_kernel_check(last["kernel"])
-                last["sec"] = truck_update.check_security_update(cfg)
-                _show_security_check(last["sec"])
+                for kind, fn, show in (
+                        ("os", truck_update.check_os_updates, _show_os_check),
+                        ("kernel", truck_update.check_kernel_update,
+                         _show_kernel_check),
+                        ("security", truck_update.check_security_update,
+                         _show_security_check)):
+                    last[kind] = fn(cfg)
+                    show(last[kind])
+                    if _offer_install(truck_update, cfg, kind, last[kind]):
+                        installed = True
+                        print()
+                        if not _confirm("  continue checking the rest? [Y/n] "):
+                            break
             elif line.startswith("apply "):
                 kind = line.split(maxsplit=1)[1].strip()
                 kind = {"os-updates": "os", "updates": "os",
@@ -360,6 +412,8 @@ def auto_update_section(app):
                     print(truck_update.apply_update(kind, cfg, yes=True))
             else:
                 print(c("unknown option.", RED))
+            if installed:
+                _pause()
         except Exception as e:  # network/JSON safety net — never crash menu
             print(c(f"auto-update: {e}", RED))
 

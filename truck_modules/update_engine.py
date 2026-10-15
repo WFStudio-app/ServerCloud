@@ -174,8 +174,19 @@ def check_os_updates(cfg):
     except RuntimeError:
         pass
 
+    # update available = remote HEAD differs from the locally installed build
+    try:
+        import subprocess as _sp
+        local_head = _sp.run(
+            ["git", "-C", _checkout_dir(), "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=10).stdout.strip()
+    except (OSError, _sp.SubprocessError):
+        local_head = ""
+    available = bool(sha) and (local_head.lower() != sha.lower())
+
     out.update({
         "ok": True,
+        "available": available,
         "commit_sha": sha,
         "short_sha": sha[:7],
         "title": _clamp(msg.splitlines()[0] if msg else "", 200),
