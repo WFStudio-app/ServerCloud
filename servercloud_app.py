@@ -38,7 +38,10 @@ from servercloud.modules.api_server import (ApiKey, KeyStore, ApiServer,
                                          generate_key)                 # noqa: E402
 from servercloud.modules.cpts_api import (CptsStore, CptsClient,
                                        validate_key as cpts_valid_key)  # noqa: E402
-from servercloud.utils.colors import banner, c, GREEN, YELLOW, RED, MAGENTA, BOLD  # noqa: E402
+from servercloud.utils.colors import banner, c, GREEN, YELLOW, RED, MAGENTA, BOLD, CYAN  # noqa: E402
+from servercloud.os import trk, truck_init, truck_boot, truck_shell     # noqa: E402
+from servercloud.os.sysconfig import SysConfig                          # noqa: E402
+from servercloud.os.scriptlib import ScriptLibrary                      # noqa: E402
 
 # NOTE: SERVERCLOUD_HOME is used by scripts/install.sh as the *checkout* dir.
 # The app's data dir must not collide with it -> use SERVERCLOUD_DATA instead.
@@ -49,6 +52,12 @@ os.makedirs(DATA_DIR, exist_ok=True)
 
 class App:
     def __init__(self):
+        # ---- TruckOS layer: bootloader + init + package manager ----
+        self.trk_root = trk.init_truck(DATA_DIR)
+        self.sysconfig = SysConfig(os.path.join(self.trk_root, "etc",
+                                                "sysconfig.json"))
+        self.scriptlib = ScriptLibrary(DATA_DIR)
+        truck_init._paths(DATA_DIR)
         self.reg = Registry(os.path.join(DATA_DIR, "models.json"))
         self.tps = 8.0
         self.mgr = Manager(self._runner)
@@ -1081,6 +1090,47 @@ class App:
 
     # ---- main REPL ----
     def run(self):
+        # ---- TruckOS boot sequence (POST + bootloader menu + init) ----
+        interactive = sys.stdin.isatty() and not os.environ.get("SERVERCLOUD_NOBOOT")
+        try:
+            runlevel, _cfg = truck_boot.boot(DATA_DIR, interactive=interactive)
+        except Exception as e:                        # noqa: BLE001
+            print(c(f"TruckOS boot failed ({e}) — continuing in bare mode.",
+                    YELLOW))
+            runlevel = "servercloud"
+        if runlevel == "rescue":
+            self.rescue_shell()
+            return
+        # ---- main TruckOS menu loop ----
+        while True:
+            choice = self.main_menu()
+            if choice is None:            # user quit
+                break
+            if choice == 1:
+                truck_shell.terminal_shell(self)
+            elif choice == 2:
+                self.llm_local_entry()
+            elif choice == 3:
+                truck_shell.script_library_shell(self)
+            elif choice == 4:
+                truck_shell.settings_shell(self)
+        self._shutdown()
+
+    # ---------- TruckOS helpers used by shells / menu ----------
+    def trk_main(self, args):
+        return trk.main(list(args), DATA_DIR) or 0
+
+    def init_main(self, args):
+        return truck_init.main(list(args), DATA_DIR) or 0
+
+    def rescue_shell(self):
+        print(c("Rescue shell — minimal environment. Type 'exit' to halt.",
+                YELLOW))
+        truck_shell.terminal_shell(self)
+        self._shutdown()
+
+    def llm_local_entry(self):
+        """Menu [2] LLM Local — runs the ServerCloud model console."""
         api_line = (f"API {self._api_url_hint()}" if (self.api and self.api.running)
                     else "API offline")
         print(banner(version_string(), self.ok, self.ver, len(self.reg.all()),
@@ -1089,18 +1139,85 @@ class App:
             print(c("Ollama not reachable — running in DEMO mode "
                     "(fake generation).", YELLOW))
         stop_event = threading.Event()
-        dash = threading.Thread(target=self.status_loop, args=(stop_event,),
-                                daemon=False)
-        dash.start()
-        print(c("Type 'help' for commands.", YELLOW))
+        dash = None
+        if not getattr(self, '_dash_started', False):
+            self._dash_started = True
+            dash = threading.Thread(target=self.status_loop, args=(stop_event,),
+                                    daemon=False)
+            dash.start()
+        print(c("Type 'help' for commands, 'back' for the TruckOS menu.",
+                YELLOW))
+        self.repl_loop(prefix="servercloud", on_back=True)
+        deadline = time.time() + 60
+        while self.mgr.active() and time.time() < deadline:
+            time.sleep(0.2)
+        time.sleep(0.3)  # final flush of result lines
+        stop_event.set()
+        if dash:
+            dash.join(timeout=2)
+        print()
+
+    def _shutdown(self):
+        truck_init.shutdown()
+        if self.api:
+            self.api.stop()
+        print("Bye.")
+
+    # ---------- main menu ----------
+    TRUCK_LOGO = r"""
+   ___                    _    ___  ____
+  / _ \_ __ _   _ _ __ | |_ / _ \/ ___|
+ | | | | '__| | | | '_ \| __| (_) \___ \
+ | |_| | |  | |_| | |_) | |_ \__, |____) |
+  \___/|_|   \__,_| .__/ \__|  /_/|____/
+                  |_|   ServerCloud embedded userland
+"""
+
+    def main_menu(self):
+        host = self.sysconfig.get("hostname", "truck-os")
+        n_models = len(self.reg.all())
+        services = truck_init._load_defs()
+        running = sum(1 for s in truck_init._state.values() if s)
+        print(c(self.TRUCK_LOGO, CYAN))
+        print(f"  {host} | v{version_string()} | models: {n_models} | "
+              f"services: {running}/{len(services)} running | "
+              f"ollama: {'ONLINE' if self.ok else 'OFFLINE'}")
+        print(BOLD + "\n  ── TruckOS Menu ──────────────────────────────" +
+              "\033[0m")
+        print("   [1] Terminal          — shell, trk packages, init control")
+        print("   [2] LLM Local         — local model factory console")
+        print("   [3] Script Library    — reusable server-ops scripts")
+        print("   [4] Settings          — TruckOS system configuration")
+        print("   [0] Quit")
+        try:
+            line = input(c(f"{host}# ", GREEN)).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return None
+        if line in ("0", "quit", "exit"):
+            return None
+        if line in ("1", ""):
+            return 1
+        if line == "2":
+            return 2
+        if line == "3":
+            return 3
+        if line == "4":
+            return 4
+        print(c("Invalid choice.", RED))
+        return 0
+
+    # ---- LLM REPL (extracted from old run()) ----
+    def repl_loop(self, prefix="servercloud", on_back=False):
         while True:
             try:
-                line = input(c("servercloud> ", GREEN)).strip()
+                line = input(c(f"{prefix}> ", GREEN)).strip()
             except (EOFError, KeyboardInterrupt):
                 break
             if not line:
                 continue
             low = line.lower()
+            if on_back and low in ("back", "menu"):
+                break
             # dispatch on the FIRST whitespace-delimited word only, so that
             # '/watson test' is never mistaken for '/w atson test', and
             # '/dlsx' is reported as an unknown command instead of running /dl.
@@ -1121,7 +1238,7 @@ class App:
                       "/cpts <SCA-key> [url] | /cptsm | /cptsuse <#> | "
                       "/cptslocal | /cptsdel <#> | "
                       "/agent [model] (coding agent) | "
-                      "/status | /stop <job id> | quit")
+                      "/status | /stop <job id> | back | quit")
             elif head == "/models":
                 self.cmd_models()
             elif head == "/bmc":
@@ -1192,6 +1309,8 @@ class App:
                 self.cmd_cptsdel(arg)
             elif head == "/agent":
                 self.cmd_agent(arg)
+            elif head == "/trk":
+                self.trk_main(line.split()[1:])
             elif head == "/stop":
                 found = False
                 for j in self.mgr.jobs:
@@ -1202,17 +1321,6 @@ class App:
                         YELLOW if found else RED))
             else:
                 print(c("Unknown command. Type help.", RED))
-        # let running generations finish (max 60s), printing their results
-        deadline = time.time() + 60
-        while self.mgr.active() and time.time() < deadline:
-            time.sleep(0.2)
-        time.sleep(0.3)  # final flush of result lines
-        stop_event.set()
-        dash.join(timeout=2)
-        if self.api:
-            self.api.stop()
-        print("Bye.")
-
 
 def main():
     App().run()

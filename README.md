@@ -1,8 +1,9 @@
 # ServerCloud ⚡
 
-**Local token factory — run 20 local LLMs on any hardware via Ollama. Built for Termux.**
+**Local token factory — run 135 local LLMs on any hardware via Ollama. Built for Termux.**
 
 Generate tokens locally, ask several models **in parallel**, watch live generation stats, pay nothing for API calls.
+Now ships with **TruckOS** — an embedded half-OS layer: bootloader, init (PID-1 style service supervisor), `trk` package manager and a 4-entry system menu.
 
 [![Version](https://img.shields.io/badge/version/2.00.2--API.Beta.0-blue)]() [![Python](https://img.shields.io/badge/python-3.6+-green)]() [![Platform](https://img.shields.io/badge/platform-Termux%20%7C%20Linux-orange)]() [![Engine](https://img.shields.io/badge/engine-Ollama-purple)]()
 
@@ -12,6 +13,11 @@ Generate tokens locally, ask several models **in parallel**, watch live generati
 
 | Feature | Description |
 |---|---|
+| 🚚 **TruckOS menu** | On launch you boot a mini-OS: POST → GRUB-style bootloader menu → init services → system menu: **[1] Terminal · [2] LLM Local · [3] Script Library · [4] Settings** |
+| 📦 **trk package manager** | Truck's own distro-like userland (`~/.servercloud/truck/{usr/bin,var/lib,etc}`): `trk install/remove/search/list/info/bin/repo/doctor`, trust levels, `.trkpkg` JSON manifests, repo indexes |
+| 🔧 **Own init** | `truck-init boot|status|start|stop|restart|shutdown` — runlevels (default / multi-user / rescue), service definitions in `etc/services.json`, log in `var/log/init.log` |
+| 🖥️ **Terminal** | Host shell commands, `cd/ls/env`, plus inline `trk`, `init`, `ollama` shortcuts |
+| 🧾 **Script Library** | Reusable server-ops snippets (disk, logs, ollama health, LAN scan…) with tags, search, run counter; add your own with `new` |
 | 🧠 **135 local models** | Small → frontier class (Llama, Qwen, Phi, Gemma, DeepSeek…), 0.4 GB … 594 GB; `/bmc` shows 25 GB+ giants |
 | 🔢 **Model numbering** | Every downloaded model gets a number right after install: `[01]`, `[02]`, … |
 | ⚙️ **Ollama engine** | Real inference through the Ollama HTTP API (`ollama serve`) — or remote host via `TOKENPFS_OLLAMA_URL` |
