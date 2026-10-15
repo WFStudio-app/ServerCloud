@@ -11,8 +11,9 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from servercloud.truck_modules import truck_update as tu          # noqa: E402
-from servercloud.truck_modules import update_markers as um        # noqa: E402
+import truck  # registers legacy aliases          # noqa: E402
+from truck.modules import update_engine as tu
+from truck.modules import update_markers as um        # noqa: E402
 
 
 class FakeCfg(dict):
@@ -45,7 +46,9 @@ class KernelCheck(unittest.TestCase):
 
     def _run(self, rel=REMOTE_REL):
         files = {um.VERSION_FILE_REL: self.REMOTE_VER + "\n",
-                 um.RELEASE_FILE_REL: rel}
+                 um.RELEASE_FILE_REL: rel,
+                 um.UPD_KERNEL_VERSION_REL: self.REMOTE_VER + "\n",
+                 um.UPD_KERNEL_RELEASE_REL: rel}
 
         def fake_raw(owner, repo, branch, path):
             if path not in files:
@@ -70,8 +73,13 @@ class KernelCheck(unittest.TestCase):
         self.assertIn(r["urgent_reason"], um.URGENT_REASONS)
 
     def test_malformed_version_rejected(self):
-        with mock.patch.object(tu, "_raw_file",
-                               lambda o, b, br, p: "/../evil" if p.endswith("VERSION.data") else ""):
+        # upd_file/ is tried first, canonical VERSION.data is the fallback —
+        # poison BOTH version paths.
+        def fake(o, b, br, p):
+            if p.endswith(("VERSION.data", "kernel_version.txt")):
+                return "/../evil"
+            return ""
+        with mock.patch.object(tu, "_raw_file", fake):
             r = tu.check_kernel_update(CFG)
             self.assertFalse(r["ok"])
             self.assertIn("malformed", r.get("error", ""))
@@ -79,7 +87,8 @@ class KernelCheck(unittest.TestCase):
     def test_up_to_date(self):
         local_ver = um.local_version_file()
         with mock.patch.object(tu, "_raw_file",
-                               lambda o, b, br, p: local_ver if p.endswith("VERSION.data")
+                               lambda o, b, br, p: local_ver
+                               if ("VERSION.data" in p or "kernel_version" in p)
                                else f"version = {local_ver}\n"):
             r = tu.check_kernel_update(CFG)
         self.assertTrue(r["ok"])
@@ -120,7 +129,7 @@ class OsCheck(unittest.TestCase):
                 "commit": {"message": "[CVE-2026-1234] fix ring leak\nbody line",
                            "author": {"name": "TruckDev",
                                       "date": "2026-10-16T00:00:00Z"}}}]
-    DETAIL = {"files": [{"filename": "servercloud/kernel/truck_kernel.py"}]}
+    DETAIL = {"files": [{"filename": "kernel/truck_kernel.py"}]}
     RELEASES = [{"tag_name": "v9", "name": "Big One", "prerelease": False,
                  "target_commitish": "main",
                  "commit": {"sha": "a" * 40}, "html_url": "https://x/y"}]

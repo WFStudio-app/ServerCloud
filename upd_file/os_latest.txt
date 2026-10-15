@@ -1,0 +1,4 @@
+commit = df6f86730c9111649172145ee0c53f3730082c52
+subject = feat(auto-update): Settings -> Auto-Update section with OS/Kernel/Security checks
+author = ServerCloud Dev
+date = 2026-10-15T19:11:05+00:00

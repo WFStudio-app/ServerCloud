@@ -283,7 +283,7 @@ def _show_security_check(r):
 
 
 def auto_update_section(app):
-    from servercloud.truck_modules import truck_update
+    from truck.modules import update_engine as truck_update
     cfg = app.sysconfig
     print(c("Auto-Update — TruckOS checks the GitHub repo; nothing is "
             "applied without confirmation.", YELLOW))

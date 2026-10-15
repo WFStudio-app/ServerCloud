@@ -1,0 +1,8 @@
+# TruckOS kernel release marker (checked by Settings -> Auto-Update)
+version = 2.0.3-truck
+urgent = false
+urgent_reason =
+security = true
+languages = Python 3 (stdlib only)
+description = Hardened syscall gate: errno-only error paths, mmap/slab/fork limits, init kill protection, trk path-traversal fixes, boot-config bounds.
+date = 2026-10-16

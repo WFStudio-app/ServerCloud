@@ -1,0 +1,9 @@
+# TruckOS security database release marker
+# (checked by Settings -> Auto-Update -> "Security Update")
+version = 2026.10.16
+urgent = false
+urgent_reason =
+severity = low
+languages = plain text (.data), Python 3
+description = Baseline hardened-kernel ruleset: syscall allowlist, errno-only error paths, memory/fork limits, trk path-traversal and URL-scheme guards. No open advisories.
+date = 2026-10-16

@@ -24,9 +24,9 @@ import subprocess
 import sys
 import time
 
-from servercloud.truck_modules import trk
-from servercloud.kernel import truck_kernel, truck_syscall
-from servercloud.truck_modules.sysconfig import SysConfig
+from truck_modules import trk
+from . import truck_kernel, truck_syscall
+from truck_modules.sysconfig import SysConfig
 
 # built-in services managed in-process
 _BUILTIN = {}

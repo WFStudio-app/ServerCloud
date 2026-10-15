@@ -28,7 +28,7 @@ Useful numbers (see SYSCALL_TABLE):
 
 import time
 
-from servercloud.kernel import truck_kernel as K
+from . import truck_kernel as K
 
 
 class SyscallError(Exception):

@@ -29,11 +29,11 @@ Everything is stdlib-only and cross-platform (Linux / Termux / macOS /
 Windows), so TruckOS runs as a self-contained userland on top of any host OS.
 """
 
-from servercloud.kernel import (  # noqa: F401  (back-compat re-exports)
+from truck.kernel import (  # noqa: F401  (back-compat re-exports)
     truck_boot,
     truck_init,
     truck_kernel,
     truck_syscall,
 )
-from servercloud.truck_modules import sysconfig, trk  # noqa: F401
-from servercloud.truck_modules.sysconfig import SysConfig  # noqa: F401
+from truck.modules import sysconfig, trk  # noqa: F401
+from truck.modules.sysconfig import SysConfig  # noqa: F401

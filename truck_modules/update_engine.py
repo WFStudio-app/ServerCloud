@@ -4,10 +4,10 @@ Three user-facing functions, all read-only against GitHub by default:
 
   1. check_os_updates()      latest commit on main + release info of that
                              push, urgency derived from changed paths;
-  2. check_kernel_update()   reads servercloud/kernel/{VERSION.data,
-                             RELEASE.data} markers from GitHub and compares
-                             them with the local kernel build;
-  3. check_security_update() reads servercloud/security/SECURITY.data and
+  2. check_kernel_update()   reads kernel/{VERSION.data,RELEASE.data}
+                             markers from GitHub and compares them with the
+                             local kernel build;
+  3. check_security_update() reads security/SECURITY.data and
                              reports the security-database status.
 
 Security posture
@@ -33,8 +33,7 @@ import urllib.request
 
 from servercloud.agent.config import load_github_token, redact
 from servercloud.core.version import version_string
-from servercloud.kernel import truck_kernel
-from servercloud.truck_modules import update_markers as um
+from . import update_markers as um
 
 API = "https://api.github.com"
 RAW = "https://raw.githubusercontent.com"
@@ -48,8 +47,8 @@ MAX_TEXT_BYTES = 64 * 1024            # markers are tiny; anything bigger is hos
 _FIELD_MAX = 500                      # per-field display truncation
 
 _URGENT_REASONS = set(um.URGENT_REASONS)
-_KERNEL_PATHS = ("servercloud/kernel/", "servercloud/truck_modules/")
-_SEC_PATHS = ("servercloud/security/",)
+_KERNEL_PATHS = ("kernel/", "truck_modules/")
+_SEC_PATHS = ("security/",)
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -197,13 +196,19 @@ def check_os_updates(cfg):
 def check_kernel_update(cfg):
     """Compare GitHub kernel markers (VERSION.data / RELEASE.data) with local."""
     owner, repo, branch = _repo_cfg(cfg)
-    installed = truck_kernel.KERNEL_VERSION          # e.g. 1.0.0-truck
+    installed = um.local_version_file() or "0.0.0"   # installed kernel build label
     out = {"ok": False, "owner": owner, "repo": repo, "branch": branch,
            "installed_kernel": installed,
            "installed_release_version": um.local_version_file() or "?"}
     try:
-        ver_txt = _raw_file(owner, repo, branch, um.VERSION_FILE_REL)
-        rel_txt = _raw_file(owner, repo, branch, um.RELEASE_FILE_REL)
+        # upd_file/ is the dedicated marker directory; kernel/ + security/
+        # copies act as fallback so older repos still check out.
+        try:
+            ver_txt = _raw_file(owner, repo, branch, um.UPD_KERNEL_VERSION_REL)
+            rel_txt = _raw_file(owner, repo, branch, um.UPD_KERNEL_RELEASE_REL)
+        except RuntimeError:
+            ver_txt = _raw_file(owner, repo, branch, um.VERSION_FILE_REL)
+            rel_txt = _raw_file(owner, repo, branch, um.RELEASE_FILE_REL)
     except RuntimeError as e:
         out["error"] = f"kernel markers unavailable: {e}"
         return out
@@ -249,7 +254,10 @@ def check_security_update(cfg):
     out = {"ok": False, "owner": owner, "repo": repo, "branch": branch,
            "installed_db": local.get("version", "?")}
     try:
-        txt = _raw_file(owner, repo, branch, um.SECURITY_DATA_FILE_REL)
+        try:
+            txt = _raw_file(owner, repo, branch, um.UPD_SECURITY_DATA_REL)
+        except RuntimeError:
+            txt = _raw_file(owner, repo, branch, um.SECURITY_DATA_FILE_REL)
     except RuntimeError as e:
         out["error"] = f"security database unavailable: {e}"
         return out
@@ -280,9 +288,8 @@ def check_security_update(cfg):
 
 # ------------------------------------------------------------ applying updates
 def _checkout_dir():
-    # .../servercloud/truck_modules/truck_update.py -> repo root
-    here = os.path.abspath(__file__)
-    return os.path.dirname(os.path.dirname(os.path.dirname(here)))
+    # <root>/truck_modules/update_engine.py -> repo root
+    return um.REPO_ROOT
 
 
 def _origin_matches(owner, repo):

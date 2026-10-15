@@ -22,9 +22,9 @@ import platform
 import sys
 import time
 
-from servercloud.truck_modules import trk
-from servercloud.kernel import truck_init, truck_kernel
-from servercloud.truck_modules.sysconfig import SysConfig
+from truck_modules import trk
+from . import truck_init, truck_kernel
+from truck_modules.sysconfig import SysConfig
 
 # sanity bounds for kernel tuning coming from the (user-editable) config
 RAM_MB_RANGE = (8, 4096)          # virtual RAM in MiB
