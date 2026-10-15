@@ -41,6 +41,8 @@ def terminal_shell(app):
             print("  ls                   list current directory")
             print("  trk <args>           Truck package manager")
             print("  init <args>          TruckOS init (status/start/stop/boot)")
+            print("  kernel <sub>         simulated TruckOS kernel "
+                  "(info|ps|dmesg|vmstat|syscalls|cat <procfile>)")
             print("  ollama <args>        talk to the local Ollama binary")
             print("  env                  show environment")
             continue
@@ -64,7 +66,7 @@ def terminal_shell(app):
             for k, v in sorted(os.environ.items()):
                 print(f"  {k}={v}")
             continue
-        # trk / init / ollama shortcuts
+        # trk / init / kernel / ollama shortcuts
         if low.startswith("trk"):
             args = line.split()[1:]
             rc = app.trk_main(args)
@@ -74,6 +76,11 @@ def terminal_shell(app):
             args = line.split()[1:] or ["status"]
             rc = app.init_main(args)
             print(DIM + f"[init exit {rc}]" + "\033[0m")
+            continue
+        if low.startswith("kernel"):
+            args = line.split()[1:] or ["info"]
+            rc = app.trk_main(["kernel"] + args)
+            print(DIM + f"[int 0x80 -> kernel, exit {rc}]" + "\033[0m")
             continue
         if low.startswith("ollama"):
             args = line.split()
@@ -194,9 +201,10 @@ def settings_shell(app):
         cur = cfg.all()
         print(BOLD + "\nCurrent configuration:" + "\033[0m")
         for k in ("hostname", "runlevel", "boot_timeout_sec", "require_trust",
-                  "ollama_bin", "api_port", "tps_cap"):
+                  "ollama_bin", "api_port", "tps_cap",
+                  "kernel_ram_mb", "kernel_ncpu", "kernel_hz"):
             print(f"  {k:<16} = {cur.get(k)}")
-        print("\n  set <key> <value> | trk <args> | services | "
+        print("\n  set <key> <value> | trk <args> | services | kernel | "
               "reset | back")
         line = _line(MAGENTA)
         low = line.lower()
@@ -204,6 +212,9 @@ def settings_shell(app):
             return
         if low == "services":
             app.init_main(["status"])
+            continue
+        if low == "kernel":
+            app.trk_main(["kernel", "info"])
             continue
         if low == "reset":
             if _confirm("  wipe all settings to defaults? [y/N] "):
@@ -219,7 +230,8 @@ def settings_shell(app):
                 print(c("usage: set <key> <value>", YELLOW))
                 continue
             key, val = parts[1], parts[2]
-            if key in ("boot_timeout_sec", "api_port"):
+            if key in ("boot_timeout_sec", "api_port", "kernel_ram_mb",
+                       "kernel_ncpu", "kernel_hz"):
                 try:
                     val = int(val)
                 except ValueError:

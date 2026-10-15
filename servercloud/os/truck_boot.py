@@ -9,7 +9,9 @@ Emulates a boot firmware + GRUB-style menu:
         [3] Rescue shell             -> runlevel 'rescue'
         [4] Boot ServerCloud directly (skip init services)
      keys: 1-4 select, space starts immediately, any other key waits
-  3. hands control to truck_init.boot(runlevel) then returns it to caller.
+  3. loads the simulated kernel (truck_kernel) — ring-0 comes up first,
+     exactly like a real bootloader jumps into vmlinux after menu selection
+  4. hands control to truck_init.boot(runlevel) then returns it to caller.
 
 Used by servercloud_app.py as the entry sequence so every launch of the
 program looks and feels like booting a small OS.
@@ -20,7 +22,7 @@ import platform
 import sys
 import time
 
-from servercloud.os import trk, truck_init
+from servercloud.os import trk, truck_init, truck_kernel
 from servercloud.os.sysconfig import SysConfig
 
 BOOTLOGO = r"""
@@ -98,6 +100,20 @@ def _menu(timeout):
     return choice or 1
 
 
+def _load_kernel(cfg):
+    """Bootloader stage: jump into the simulated ring-0 kernel."""
+    ram_mb = int(cfg.get("kernel_ram_mb", 64))
+    k = truck_kernel.Kernel(hostname=cfg.get("hostname", "truck-os"),
+                            ncpu=int(cfg.get("kernel_ncpu", 2)),
+                            ram_bytes=ram_mb << 20)
+    k.hz = int(cfg.get("kernel_hz", truck_kernel.HZ_DEFAULT))
+    print(f"\nboot: loading kernel image vmlinuz-{truck_kernel.KERNEL_VERSION}"
+          f" ({ram_mb} MiB virtual RAM) ...")
+    k.start()
+    truck_kernel._DEFAULT = k            # publish the singleton
+    return k
+
+
 def boot(data_dir, interactive=True):
     root = trk.init_truck(data_dir)
     cfg = SysConfig(os.path.join(root, "etc", "sysconfig.json"))
@@ -113,6 +129,7 @@ def boot(data_dir, interactive=True):
     label, runlevel = ENTRIES[sel - 1]
     print(f"\nboot: selected '{label}'")
     if runlevel != "servercloud":
+        _load_kernel(cfg)                 # ring 0 comes up first
         truck_init._paths(data_dir)
         truck_init.boot(runlevel, cfg)
     return runlevel, cfg

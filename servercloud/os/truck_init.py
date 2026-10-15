@@ -12,6 +12,10 @@ external command.  Init can:
 ServerCloud's own long-running pieces (the network API server, the ollama
 backend probe) are registered as services here so the 'half-OS' really owns
 process lifecycle, just like systemd would on a full distro.
+
+Init is PID 1 *inside the simulated kernel*: every action it takes goes
+through the int 0x80 syscall gate (truck_syscall.sysint), and the kernel
+task table is kept in sync (fork/exit per service).
 """
 
 import json
@@ -20,7 +24,7 @@ import subprocess
 import sys
 import time
 
-from servercloud.os import trk
+from servercloud.os import trk, truck_kernel, truck_syscall
 from servercloud.os.sysconfig import SysConfig
 
 # built-in services managed in-process
@@ -35,6 +39,12 @@ SERVICES_FILE = None
 LOG_FILE = None
 _state = {}       # name -> running bool
 _proc = {}        # name -> Popen for external services
+_kpid = {}        # name -> pid inside the simulated kernel task table
+
+
+def _k():
+    """The simulated kernel init talks to (bootloader-created singleton)."""
+    return truck_kernel.default_kernel()
 
 
 def _paths(data_dir):
@@ -73,6 +83,27 @@ def _load_defs():
 
 
 # ---------------------------------------------------------------- actions
+def _k_fork(name):
+    """Ask the kernel (via int 0x80) to create a task for this service."""
+    k = _k()
+    if k.state != "running":
+        return None
+    pid = truck_syscall.sysint(12, 1, name[:20], kernel=k)   # sys_fork_exec(ppid=1)
+    if isinstance(pid, int) and pid > 0:
+        truck_syscall.sysint(13, pid, f"init:{name}", kernel=k)  # sys_execve
+        truck_syscall.sysint(7, pid, 4 * truck_kernel.PAGE_SIZE,
+                             kernel=k)                          # sys_mmap stack
+        _kpid[name] = pid
+    return pid
+
+
+def _k_exit(name, code=0):
+    k = _k()
+    pid = _kpid.pop(name, None)
+    if pid is not None and k.state == "running":
+        truck_syscall.sysint(14, pid, code, kernel=k)         # sys_exit
+
+
 def start_service(name, cfg=None):
     defs = _load_defs()
     d = defs.get(name)
@@ -85,8 +116,12 @@ def start_service(name, cfg=None):
     if name in _BUILTIN:
         ok = _BUILTIN[name]["start"](cfg)
         _state[name] = bool(ok)
+        if ok:
+            _k_fork(name)
         _log(f"start builtin {name}: {'ok' if ok else 'fail'}")
-        print(f"init: {name} {'started' if ok else 'FAILED to start'}.")
+        print(f"init: {name} {'started' if ok else 'FAILED to start'}."
+              + (f" (kernel pid {_kpid.get(name)})" if ok and name in _kpid
+                 else ""))
         return 0 if ok else 1
     cmd = d.get("cmd")
     if cmd:
@@ -95,8 +130,10 @@ def start_service(name, cfg=None):
                                  stderr=subprocess.DEVNULL)
             _proc[name] = p
             _state[name] = True
+            _k_fork(name)
             _log(f"start external {name} pid={p.pid}")
-            print(f"init: {name} started (pid {p.pid}).")
+            print(f"init: {name} started (pid {p.pid}, "
+                  f"kernel pid {_kpid.get(name, '-')}).")
             return 0
         except OSError as e:
             print(f"init: {name} could not start: {e}")
@@ -109,6 +146,7 @@ def stop_service(name):
     if name in _BUILTIN and _state.get(name):
         _BUILTIN[name]["stop"]()
         _state[name] = False
+        _k_exit(name)
         _log(f"stop builtin {name}")
         print(f"init: {name} stopped.")
         return 0
@@ -120,11 +158,13 @@ def stop_service(name):
         except subprocess.TimeoutExpired:
             p.kill()
         _state[name] = False
+        _k_exit(name)
         _log(f"stop external {name}")
         print(f"init: {name} stopped.")
         return 0
     if _state.get(name):
         _state[name] = False
+        _k_exit(name)
         print(f"init: {name} marked stopped.")
         return 0
     print(f"init: {name} not running.")
@@ -132,9 +172,17 @@ def stop_service(name):
 
 
 def boot(runlevel, cfg=None):
+    k = _k()
     defs = _load_defs()
     hostname = cfg.get("hostname") if cfg else "truck-os"
-    print(f"init: PID 1 — welcoming {hostname} (runlevel: {runlevel})")
+    # PID 1 registers itself inside the simulated kernel task table
+    if k.state == "running" and 1 not in k.sched.tasks:
+        t = k.sched.fork_exec(0, "init", prio=100)
+        t.pid = 1
+        k.mm.add_task(1)
+    up = k.uptime()
+    print(f"init: PID 1 — welcoming {hostname} (runlevel: {runlevel}) "
+          f"[kernel up {up:.2f}s, {k.hz} Hz]")
     _log(f"boot runlevel={runlevel}")
     for name, d in sorted(defs.items()):
         if not d.get("enabled", False):
@@ -150,8 +198,12 @@ def boot(runlevel, cfg=None):
 def status(cfg=None):
     defs = _load_defs()
     host = cfg.get("hostname") if cfg else "truck-os"
+    k = _k()
     up = time.strftime("%H:%M:%S")
-    print(f"{host}: init status @ {up}")
+    kern = (f" | kernel {truck_kernel.KERNEL_VERSION} "
+            f"up {k.uptime():.1f}s ({k.syscall_count} syscalls, "
+            f"{k.timer_irq} timer IRQs)" if k.state == "running" else "")
+    print(f"{host}: init status @ {up}{kern}")
     if not defs:
         print("  (no services defined)")
         return 0
@@ -161,7 +213,9 @@ def status(cfg=None):
         if ext and ext.poll() is not None:
             st = "DEAD"
         kind = "builtin" if name in _BUILTIN else "external"
-        print(f"  {name:<12} [{st:^7}] ({kind}) {d.get('desc', '')}")
+        kpid = _kpid.get(name)
+        kp = f" [kpid {kpid}]" if kpid else ""
+        print(f"  {name:<12} [{st:^7}] ({kind}){kp} {d.get('desc', '')}")
     return 0
 
 
@@ -170,6 +224,9 @@ def shutdown():
         if _state[name]:
             stop_service(name)
     _log("shutdown")
+    k = _k()
+    if k.state == "running":
+        k.halt("TruckOS system halted")
     print("init: system halted.")
     return 0
 

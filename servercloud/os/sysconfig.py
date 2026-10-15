@@ -17,9 +17,16 @@ DEFAULTS = {
     "ollama_bin": "ollama",         # path/name of the ollama binary
     "api_port": 8777,
     "tps_cap": 8.0,                 # generation speed cap (tokens/sec)
+    # ---- simulated kernel tuning (truck_kernel / truck_boot) ----
+    "kernel_ram_mb": 64,            # virtual RAM size in MiB
+    "kernel_ncpu": 2,               # emulated CPU count (/proc/cpuinfo)
+    "kernel_hz": 100,               # timer interrupt frequency
     "services": {},                 # per-service overrides: {"name": {...}}
     "settings": {},                 # free-form user settings
 }
+
+_INT_KEYS = ("boot_timeout_sec", "api_port", "kernel_ram_mb", "kernel_ncpu",
+             "kernel_hz")
 
 
 class SysConfig:

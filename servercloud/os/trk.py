@@ -332,12 +332,79 @@ def main(argv, data_dir=None):
                         rest[1] if len(rest) > 1 else None)
     if cmd == "doctor":
         return cmd_doctor()
+    if cmd == "kernel":
+        return cmd_kernel(rest)
     print(f"trk: unknown command '{cmd}'.")
     return _usage()
 
 
+# ------------------------------------------------------------- kernel cmds
+def cmd_kernel(args):
+    """trk kernel <sub> — inspect the simulated TruckOS ring-0 kernel.
+
+    subcommands: info | ps | dmesg | vmstat | syscalls | cat <procpath>
+    All access goes through the int 0x80 syscall gate (truck_syscall).
+    """
+    from servercloud.os import truck_kernel, truck_syscall
+    k = truck_kernel.default_kernel()
+    if k.state != "running":
+        print("trk kernel: no kernel is running (boot via truck_boot first).")
+        return 1
+    sub = args[0] if args else "info"
+    k.tick()                                   # let timer IRQs accrue
+    if sub == "info":
+        stats = truck_syscall.sysint(11, "stats", kernel=k)
+        mem_total_kb = k.phys.size // 1024
+        mem_free_kb = stats["mem_free_pages"] * truck_kernel.PAGE_SIZE // 1024
+        print(f"  kernel       : {truck_kernel.KERNEL_NAME} "
+              f"{truck_kernel.KERNEL_VERSION} ({truck_kernel.KERNEL_BUILDOPT})")
+        print(f"  state        : {stats['state']}")
+        print(f"  uptime       : {stats['uptime']} s   hz={k.hz}")
+        print(f"  cpu(s)       : {k.ncpu} x Truck Virtual CPU v1")
+        print(f"  memory       : {mem_free_kb} / {mem_total_kb} kB free "
+              f"({stats['mem_free_pages']}/{stats['mem_total_pages']} pages)")
+        print(f"  slab         : {stats['slab']}")
+        print(f"  vm           : {stats['vm']}")
+        print(f"  syscalls     : {stats['syscall_count']}   "
+              f"timer IRQs: {stats['timer_irq']}   "
+              f"context switches: {stats['context_switches']}")
+        return 0
+    if sub == "ps":
+        lines = truck_syscall.sysint(11, "ps", kernel=k)
+        print("  PID NAME                 ST PPID NICE VRUNTIME      CPU")
+        for ln in lines:
+            print("  " + ln)
+        return 0
+    if sub == "dmesg":
+        for ln in k.boot_log:
+            print("  " + ln)
+        return 0
+    if sub == "vmstat":
+        txt = truck_syscall.sysint(0, "/proc/vmstat", kernel=k) or ""
+        for ln in txt.splitlines():
+            print("  " + ln)
+        return 0
+    if sub == "syscalls":
+        print(truck_syscall.render_table())
+        return 0
+    if sub == "cat":
+        if len(args) < 2:
+            print("usage: trk kernel cat <procpath>")
+            return 1
+        txt = truck_syscall.sysint(0, args[1], kernel=k)
+        if txt is None:
+            print(f"  cat: {args[1]}: No such file or directory (-ENOENT)")
+            return 1
+        sys.stdout.write(txt)
+        return 0
+    print(f"trk kernel: unknown subcommand '{sub}' "
+          f"(info|ps|dmesg|vmstat|syscalls|cat).")
+    return 1
+
+
 def _usage():
-    print("usage: trk install|remove|list|search|info|bin|repo|doctor ...")
+    print("usage: trk install|remove|list|search|info|bin|repo|doctor|"
+          "kernel ...")
     return 1
 
 

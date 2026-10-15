@@ -38,8 +38,10 @@ from servercloud.modules.api_server import (ApiKey, KeyStore, ApiServer,
                                          generate_key)                 # noqa: E402
 from servercloud.modules.cpts_api import (CptsStore, CptsClient,
                                        validate_key as cpts_valid_key)  # noqa: E402
-from servercloud.utils.colors import banner, c, GREEN, YELLOW, RED, MAGENTA, BOLD, CYAN  # noqa: E402
-from servercloud.os import trk, truck_init, truck_boot, truck_shell     # noqa: E402
+from servercloud.utils.colors import (banner, c, GREEN, YELLOW, RED, MAGENTA,
+                                      BOLD, CYAN, DIM)                  # noqa: E402
+from servercloud.os import (trk, truck_init, truck_boot, truck_shell,
+                            truck_kernel, truck_syscall)               # noqa: E402
 from servercloud.os.sysconfig import SysConfig                          # noqa: E402
 from servercloud.os.scriptlib import ScriptLibrary                      # noqa: E402
 
@@ -58,6 +60,9 @@ class App:
                                                 "sysconfig.json"))
         self.scriptlib = ScriptLibrary(DATA_DIR)
         truck_init._paths(DATA_DIR)
+        # simulated ring-0 kernel (user-space emulation); the bootloader
+        # replaces this with a tuned instance during truck_boot.boot()
+        self.kernel = truck_kernel.default_kernel()
         self.reg = Registry(os.path.join(DATA_DIR, "models.json"))
         self.tps = 8.0
         self.mgr = Manager(self._runner)
@@ -1098,6 +1103,14 @@ class App:
             print(c(f"TruckOS boot failed ({e}) — continuing in bare mode.",
                     YELLOW))
             runlevel = "servercloud"
+        if self.kernel.state != "running":
+            # entry 4 / bare mode: bring ring 0 up anyway so userland has a kernel
+            try:
+                self.kernel = truck_boot._load_kernel(self.sysconfig)
+                truck_init.boot(runlevel if runlevel != "servercloud"
+                                else "default", self.sysconfig)
+            except Exception as e:                    # noqa: BLE001
+                print(c(f"kernel load failed ({e}).", RED))
         if runlevel == "rescue":
             self.rescue_shell()
             return
@@ -1178,10 +1191,18 @@ class App:
         n_models = len(self.reg.all())
         services = truck_init._load_defs()
         running = sum(1 for s in truck_init._state.values() if s)
+        k = self.kernel
+        k.tick()                       # keep timer IRQs / scheduler alive
+        kern_tag = (f"kernel {truck_kernel.KERNEL_VERSION} up {k.uptime():.0f}s"
+                    if k.state == "running" else f"kernel {k.state}")
         print(c(self.TRUCK_LOGO, CYAN))
         print(f"  {host} | v{version_string()} | models: {n_models} | "
               f"services: {running}/{len(services)} running | "
               f"ollama: {'ONLINE' if self.ok else 'OFFLINE'}")
+        print(DIM + f"  ring0: {kern_tag} | {k.ncpu} vCPU | "
+              f"{k.phys.npages_free}/{k.phys.npages_total} pages free | "
+              f"{k.syscall_count} syscalls | {k.timer_irq} timer IRQs"
+              + "\033[0m")
         print(BOLD + "\n  ── TruckOS Menu ──────────────────────────────" +
               "\033[0m")
         print("   [1] Terminal          — shell, trk packages, init control")
