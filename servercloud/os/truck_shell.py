@@ -2,6 +2,13 @@
 
 Each function returns control to the main menu when the user types
 'back' / 'exit' or presses Ctrl-C / Ctrl-D.  All UI text is English.
+
+UI conventions
+--------------
+* Every screen redraw clears the terminal first (``clear_screen``) so only
+  the current menu/function is visible — a clean "GUI" feel.
+* In every settings sub-menu you can enter just the NUMBER of a section
+  (e.g. ``1``) to jump straight into it — no command word required.
 """
 
 import os
@@ -10,6 +17,28 @@ import sys
 
 from servercloud.utils.colors import (c, GREEN, YELLOW, RED, CYAN,
                                     BOLD, DIM, MAGENTA)
+
+
+def clear_screen():
+    """ANSI clear-screen + home cursor; silently no-op on dumb terminals."""
+    if os.environ.get("TERM") == "dumb" or not sys.stdout.isatty():
+        return
+    try:
+        sys.stdout.write("\033[2J\033[H")
+        sys.stdout.flush()
+    except Exception:                              # noqa: BLE001
+        pass
+
+
+def _header(title, subtitle=""):
+    """Standard framed title used by every sub-shell screen."""
+    line = "═" * max(24, len(title) + 6)
+    print(c(f"╔{line}╗", CYAN))
+    print(c(f"║  {title}" + " " * (len(line) - len(title) - 2) + "║", CYAN + BOLD))
+    if subtitle:
+        print(c(f"║  {subtitle}" + " " * (len(line) - len(subtitle) - 2) + "║",
+                CYAN))
+    print(c(f"╚{line}╝", CYAN))
 
 
 def _prompt(shell, color=GREEN):
@@ -26,8 +55,8 @@ def _line(prompt_color=GREEN):
 # ------------------------------------------------------------ TERMINAL
 def terminal_shell(app):
     """Menu [1] Terminal — host shell + trk package commands inline."""
-    print(c("TruckOS Terminal — type 'help' for commands, 'back' for menu.",
-            YELLOW))
+    clear_screen()
+    _header("TRUCKOS TERMINAL", "type 'help' for commands · 'back' → main menu")
     if app.trk_root:
         print(DIM + f"  truck root: {app.trk_root}" + "\033[0m")
     while True:
@@ -113,10 +142,11 @@ def llm_local_shell(app):
 def script_library_shell(app):
     lib = app.scriptlib
     lib.seed_defaults()
-    print(c("Script Library — reusable server-ops snippets.", YELLOW))
     while True:
+        clear_screen()
+        _header("SCRIPT LIBRARY", "reusable server-ops snippets")
         items = lib.list()
-        print(BOLD + "\nScripts:" + "\033[0m")
+        print(BOLD + f"  Scripts ({len(items)}):" + "\033[0m")
         if not items:
             print("  (empty — add one with 'new')")
         for i, r in enumerate(items, 1):
@@ -285,15 +315,21 @@ def _show_security_check(r):
 def auto_update_section(app):
     from truck.modules import update_engine as truck_update
     cfg = app.sysconfig
-    print(c("Auto-Update — TruckOS checks the GitHub repo; nothing is "
-            "applied without confirmation.", YELLOW))
     last = {}
     while True:
-        print("\n  [1] Check OS Updates    [2] Kernel Update    "
-              "[3] Security Update")
-        print("  a) run all checks | apply os|kernel|security | back")
+        clear_screen()
+        _header("SETTINGS ▸ AUTO-UPDATE",
+                "checks the GitHub repo · nothing applied without confirmation")
+        print("   ┌──────────────────────────────────────────────┐")
+        print("   │  [1] Check OS Updates                        │")
+        print("   │  [2] Kernel Update                           │")
+        print("   │  [3] Security Update                         │")
+        print("   │  [a] Run all three checks                    │")
+        print("   │  apply os | kernel | security — pull update  │")
+        print("   │  back / 0 — return to Settings               │")
+        print("   └──────────────────────────────────────────────┘")
         line = _line(CYAN).lower()
-        if line in ("back", "exit", "quit", ""):
+        if line in ("back", "exit", "quit", "", "0"):
             return
         try:
             if line in ("1", "check os"):
@@ -329,26 +365,71 @@ def auto_update_section(app):
 
 
 # ------------------------------------------------------------ SETTINGS
+SETTINGS_SECTIONS = {
+    "1": ("Auto-Update", "OS / kernel / security update checks"),
+    "2": ("Services", "init service manager status"),
+    "3": ("Kernel Info", "ring 0 build, memory, scheduler"),
+    "4": ("Package Manager", "trk — install/remove/search packages"),
+}
+
+
 def settings_shell(app):
     cfg = app.sysconfig
-    print(c("TruckOS Settings — changes are saved immediately.", YELLOW))
     while True:
+        clear_screen()
+        _header("TRUCKOS SETTINGS", "changes are saved immediately")
         cur = cfg.all()
-        print(BOLD + "\n== Auto-Update ==" + "\033[0m")
-        print("  [u] open Auto-Update section:")
-        print("      1. Check OS Updates   2. Kernel Update   "
-              "3. Security Update")
-        print(BOLD + "\nCurrent configuration:" + "\033[0m")
+        print(BOLD + "  ── Sections (enter the number to open) ──" + "\033[0m")
+        for num, (name, desc) in SETTINGS_SECTIONS.items():
+            print(f"   [{num}] {name:<18} — {desc}")
+        print("   [5] Reset settings to defaults")
+        print(BOLD + "\n  ── Current configuration ──" + "\033[0m")
         for k in ("hostname", "runlevel", "boot_timeout_sec", "require_trust",
                   "ollama_bin", "api_port", "tps_cap",
                   "kernel_ram_mb", "kernel_ncpu", "kernel_hz"):
-            print(f"  {k:<16} = {cur.get(k)}")
-        print("\n  auto-update | set <key> <value> | trk <args> | services | "
-              "kernel | reset | back")
+            print(f"    {k:<16} = {cur.get(k)}")
+        print("\n  set <key> <value> | back / 0 → main menu")
         line = _line(MAGENTA)
-        low = line.lower()
-        if low in ("back", "exit", "quit", ""):
+        low = line.lower().strip()
+        if low in ("back", "exit", "quit", "", "0"):
             return
+        # ---- numeric section shortcuts ----
+        if low == "1":
+            auto_update_section(app)
+            continue
+        if low == "2":
+            clear_screen()
+            _header("SETTINGS ▸ SERVICES")
+            app.init_main(["status"])
+            _pause()
+            continue
+        if low == "3":
+            clear_screen()
+            _header("SETTINGS ▸ KERNEL INFO")
+            app.trk_main(["kernel", "info"])
+            _pause()
+            continue
+        if low == "4":
+            clear_screen()
+            _header("SETTINGS ▸ PACKAGE MANAGER (trk)")
+            app.trk_main(["list"])
+            print(DIM + "  trk search <pkg> | trk install <pkg> | "
+                  "trk remove <pkg>" + "\033[0m")
+            sub = _input("  trk> ")
+            if sub:
+                app.trk_main(sub.split())
+                _pause()
+            continue
+        if low == "5":
+            if _confirm("  wipe all settings to defaults? [y/N] "):
+                cfg.set("hostname", "truck-os")
+                cfg.set("runlevel", "default")
+                cfg.set("boot_timeout_sec", 5)
+                cfg.set("require_trust", True)
+                print(c("settings reset.", GREEN))
+                _pause()
+            continue
+        # ---- text commands still work ----
         if low in ("u", "auto-update", "auto update", "autoupdate"):
             auto_update_section(app)
             continue
@@ -357,14 +438,6 @@ def settings_shell(app):
             continue
         if low == "kernel":
             app.trk_main(["kernel", "info"])
-            continue
-        if low == "reset":
-            if _confirm("  wipe all settings to defaults? [y/N] "):
-                cfg.set("hostname", "truck-os")
-                cfg.set("runlevel", "default")
-                cfg.set("boot_timeout_sec", 5)
-                cfg.set("require_trust", True)
-                print(c("settings reset.", GREEN))
             continue
         if low.startswith("set "):
             parts = line.split(maxsplit=2)
@@ -391,7 +464,16 @@ def settings_shell(app):
         if low.startswith("trk"):
             app.trk_main(line.split()[1:])
             continue
-        print(c("unknown command.", RED))
+        print(c("unknown command or section number.", RED))
+        _pause()
+
+
+def _pause():
+    """Wait for Enter so sub-screen output isn't wiped by the next redraw."""
+    try:
+        input(c("\n  press ENTER to continue…", DIM))
+    except (EOFError, KeyboardInterrupt):
+        pass
 
 
 def _confirm(prompt):

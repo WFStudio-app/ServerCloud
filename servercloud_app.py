@@ -44,7 +44,7 @@ from truck.modules import trk                                # noqa: E402
 from truck.modules.sysconfig import SysConfig                  # noqa: E402
 from truck.kernel import (truck_init, truck_boot,                    # noqa: E402
                                 truck_kernel, truck_syscall)
-from servercloud.os import truck_shell                                    # noqa: E402
+from servercloud.os import truck_shell       # noqa: E402  (clear_screen used in menu)
 from servercloud.os.scriptlib import ScriptLibrary                      # noqa: E402
 
 # NOTE: SERVERCLOUD_HOME is used by scripts/install.sh as the *checkout* dir.
@@ -1197,6 +1197,7 @@ class App:
         k.tick()                       # keep timer IRQs / scheduler alive
         kern_tag = (f"kernel {truck_kernel.KERNEL_VERSION} up {k.uptime():.0f}s"
                     if k.state == "running" else f"kernel {k.state}")
+        truck_shell.clear_screen()             # every menu redraw starts on a clean screen
         print(c(self.TRUCK_LOGO, CYAN))
         print(f"  {host} | v{version_string()} | models: {n_models} | "
               f"services: {running}/{len(services)} running | "
@@ -1205,13 +1206,19 @@ class App:
               f"{k.phys.npages_free}/{k.phys.npages_total} pages free | "
               f"{k.syscall_count} syscalls | {k.timer_irq} timer IRQs"
               + "\033[0m")
-        print(BOLD + "\n  ── TruckOS Menu ──────────────────────────────" +
-              "\033[0m")
-        print("   [1] Terminal          — shell, trk packages, init control")
-        print("   [2] LLM Local         — local model factory console")
-        print("   [3] Script Library    — reusable server-ops scripts")
-        print("   [4] Settings          — TruckOS system configuration")
-        print("   [0] Quit")
+        print(BOLD + "\n  ┌────────────────────────────────────────────┐"
+              + "\033[0m")
+        print(BOLD + "  │           TRUCKOS  MAIN  MENU              │"
+              + "\033[0m")
+        print(BOLD + "  ├────────────────────────────────────────────┤"
+              + "\033[0m")
+        print("  │   [1] Terminal         shell · trk · init  │")
+        print("  │   [2] LLM Local        local model factory     │")
+        print("  │   [3] Script Library   server-ops snippets     │")
+        print("  │   [4] Settings         system configuration    │")
+        print("  │   [0] Quit                                     │")
+        print(BOLD + "  └────────────────────────────────────────────┘"
+              + "\033[0m")
         try:
             line = input(c(f"{host}# ", GREEN)).strip().lower()
         except (EOFError, KeyboardInterrupt):
@@ -1226,7 +1233,7 @@ class App:
             return 3
         if line == "4":
             return 4
-        print(c("Invalid choice.", RED))
+        print(c("Invalid choice — enter 1, 2, 3, 4 or 0.", RED))
         return 0
 
     # ---- LLM REPL (extracted from old run()) ----
