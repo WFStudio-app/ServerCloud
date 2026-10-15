@@ -26,8 +26,8 @@ import time
 
 # ------------------------------------------------------------------ constants
 KERNEL_NAME = "TruckOS Kernel"
-KERNEL_VERSION = "2.0.3-truck"
-KERNEL_BUILDOPT = "SMP PREEMPT LOCALSIM"
+KERNEL_VERSION = "2.1.0-truck"
+KERNEL_BUILDOPT = "SMP PREEMPT LOCALSIM PORTABLE VFS"
 
 PAGE_SHIFT = 12                 # 4 KiB pages, like x86_64 Linux
 PAGE_SIZE = 1 << PAGE_SHIFT     # 4096
@@ -345,6 +345,7 @@ class Task:
     TASK_RUNNING = "R"
     TASK_SLEEPING = "S"
     TASK_ZOMBIE = "Z"
+    TASK_STOPPED = "T"
 
     def __init__(self, pid, ppid, name, prio=120):
         self.pid = pid
@@ -358,6 +359,9 @@ class Task:
         self.stime = 0.0
         self.started = time.monotonic()
         self.exit_code = None
+        self.uid = 0                          # root by default (kernel tasks)
+        self.signal_mask = set()              # blocked signals (sigprocmask)
+        self.handlers = {}                    # signum -> "default"|"ignore"
 
     @property
     def nice(self):
@@ -538,6 +542,187 @@ class ProcFs:
         raise FileNotFoundError(path)
 
 
+# ------------------------------------------------------------- VFS / tmpfs
+class Inode:
+    def __init__(self, mode="rw", is_dir=False):
+        self.data = bytearray() if not is_dir else None
+        self.children = {} if is_dir else None
+        self.mode = mode
+        self.is_dir = is_dir
+
+
+class TmpFs:
+    """Tiny in-kernel filesystem so userland can keep files across the
+    syscall gate (used by trk caches, init state, shell scratch)."""
+
+    MAX_FILE_BYTES = 256 * 1024          # DoS cap per file
+
+    def __init__(self):
+        self.root = Inode(is_dir=True)
+
+    @staticmethod
+    def _split(path):
+        if not isinstance(path, str) or not path.startswith("/"):
+            raise KernelFault(-22, f"tmpfs: bad path {path!r}")
+        parts = [p for p in path.split("/") if p not in ("", ".")]
+        if any(p == ".." for p in parts):
+            raise KernelFault(-22, "tmpfs: path traversal rejected")
+        return parts
+
+    def _walk(self, parts, create_dirs=False):
+        node = self.root
+        for i, name in enumerate(parts):
+            if node.children is None:
+                raise KernelFault(-20, f"{name}: not a directory")   # ENOTDIR
+            child = node.children.get(name)
+            if child is None:
+                if not create_dirs:
+                    raise FileNotFoundError("/".join([""] + parts))   # ENOENT
+                child = Inode(is_dir=(i < len(parts) - 1))
+                node.children[name] = child
+            node = child
+        return node
+
+    def write(self, path, data):
+        parts = self._split(path)
+        leaf = parts[-1]
+        parent = self._walk(parts[:-1], create_dirs=True)
+        if parent.children is None:
+            raise KernelFault(-20, "tmpfs: not a directory")
+        node = parent.children.get(leaf)
+        if node is None or node.is_dir:
+            node = Inode()
+            parent.children[leaf] = node
+        blob = data.encode("utf-8") if isinstance(data, str) else bytes(data)
+        if len(blob) > self.MAX_FILE_BYTES:
+            raise KernelFault(-27, "tmpfs: file too large (-EFBIG)")  # EFBIG
+        node.data[:] = blob
+        return len(blob)
+
+    def read(self, path):
+        node = self._walk(self._split(path))
+        if node.is_dir:
+            raise KernelFault(-21, "tmpfs: is a directory")           # EISDIR
+        return bytes(node.data)
+
+    def ls(self, path="/"):
+        node = self._walk(self._split(path))
+        if not node.is_dir:
+            return []
+        return sorted(node.children)
+
+    def rm(self, path):
+        parts = self._split(path)
+        parent = self._walk(parts[:-1])
+        if parent.children.pop(parts[-1], None) is None:
+            raise FileNotFoundError(path)
+        return True
+
+
+# ---------------------------------------------------------------- signals
+SIG_NAMES = {1: "SIGHUP", 2: "SIGINT", 9: "SIGKILL", 15: "SIGTERM",
+             18: "SIGCONT", 19: "SIGSTOP"}
+
+
+class SignalRegistry:
+    """Per-task pending-signal sets with real POSIX semantics:
+       * SIGKILL/SIGSTOP cannot be caught or ignored
+       * a task blocked in SIGSTOP stays stopped until SIGCONT
+    """
+
+    UNBLOCKABLE = frozenset({9, 19})
+
+    def __init__(self):
+        self.pending = {}              # pid -> set(signum)
+        self.delivered = 0
+
+    def send(self, pid, sig):
+        if sig not in SIG_NAMES:
+            raise KernelFault(-22, f"kill: unsupported signal {sig}")
+        t = self._task(pid)
+        if pid == 1 and sig in (9, 15, 2, 1):
+            return False               # init is immortal (see Scheduler.kill)
+        self.pending.setdefault(pid, set()).add(sig)
+        if sig == 19:                  # SIGSTOP
+            t.state = Task.TASK_STOPPED
+        if sig == 18:                  # SIGCONT
+            if t.state == Task.TASK_STOPPED:
+                t.state = Task.TASK_RUNNING
+            self.pending.get(pid, set()).discard(19)
+        return True
+
+    def _task(self, pid):
+        from . import truck_syscall     # avoid cycle at import time
+        k = truck_syscall.CURRENT_KERNEL
+        if k is None:
+            raise KernelFault(-3, "no kernel")
+        t = k.sched.tasks.get(pid)
+        if t is None:
+            raise KernelFault(-3, f"kill({pid}): no such process")   # ESRCH
+        return t
+
+    def collect(self, pid):
+        s = self.pending.pop(pid, set())
+        self.delivered += len(s)
+        return sorted(s)
+
+
+# ---------------------------------------------------------------- futex
+class FutexTable:
+    """Minimal lock primitives: try_lock/unlock/contended counter."""
+
+    def __init__(self):
+        self.locks = {}                # key -> owner pid
+        self.contended = 0
+
+    def try_lock(self, key, pid):
+        if not isinstance(key, str) or not key:
+            raise KernelFault(-22, "futex: bad key")
+        cur = self.locks.get(key)
+        if cur is None:
+            self.locks[key] = pid
+            return True
+        if cur == pid:                 # recursive acquire succeeds
+            return True
+        self.contended += 1
+        return False                   # EAGAIN-style: caller must wait
+
+    def unlock(self, key, pid):
+        if self.locks.get(key) != pid:
+            raise KernelFault(-1, "futex: not owner (EPERM)")
+        del self.locks[key]
+        return True
+
+
+# ---------------------------------------------------------------- watchdog
+class Watchdog:
+    """soft/hard dog: services pet it; expiry triggers recovery action."""
+
+    def __init__(self, timeout_sec=30.0):
+        self.timeout = timeout_sec
+        self.last_pet = time.monotonic()
+        self.expirations = 0
+        self.armed = False
+
+    def arm(self):
+        self.armed = True
+        self.last_pet = time.monotonic()
+
+    def pet(self):
+        if self.armed:
+            self.last_pet = time.monotonic()
+
+    def check(self):
+        """Returns True while healthy; on expiry counts + restarts timer."""
+        if not self.armed:
+            return True
+        if time.monotonic() - self.last_pet > self.timeout:
+            self.expirations += 1
+            self.last_pet = time.monotonic()      # recovery, not panic
+            return False
+        return True
+
+
 # ------------------------------------------------------------------ kernel
 class Kernel:
     """Singleton-ish kernel object; owns every simulated subsystem."""
@@ -559,6 +744,13 @@ class Kernel:
         self.mm = VMManager(self.phys)
         self.sched = Scheduler()
         self.proc = ProcFs(self)
+        # --- v2.1 additions: VFS, signals, sync primitives, watchdog -----
+        self.vfs = TmpFs()
+        self.signals = SignalRegistry()
+        self.futex = FutexTable()
+        self.watchdog = Watchdog(timeout_sec=30.0)
+        self.port_hal = None            # set by truck_boot (porting layer)
+        self.uid_map = {}               # pid -> uid (privilege model)
 
         self._last_tick = time.monotonic()
         self._panic_trace = []
@@ -592,6 +784,22 @@ class Kernel:
         self._klog("INFO", "syscall: int 0x80 gate registered "
                            "(see truck_syscall.table)")
         self._klog("INFO", "procfs: /proc /sys mounted (in-memory)")
+        self._klog("INFO", "vfs: trucktmpfs mounted at /tmp (256K/file cap)")
+        self._klog("INFO", "signal: POSIX registry active (SIGKILL/SIGSTOP "
+                           "unblockable, init immortal)")
+        self._klog("INFO", "sync: futex table ready")
+        self._klog("INFO", "watchdog: soft-dog armed on request only")
+        # porting layer: bind a HAL so the kernel is platform-aware
+        try:
+            from .porting import detect_host
+            self.port_hal = detect_host()
+            self._klog("INFO", f"hal: bound {self.port_hal.name} "
+                               f"(pages={self.port_hal.page_size()}B, "
+                               f"display={self.port_hal.display_backend()}, "
+                               f"net={self.port_hal.network_backend()})")
+        except Exception as exc:                      # porting is optional
+            self._klog("WARN", f"hal: host detection failed ({exc}); "
+                               f"falling back to generic 4K/syscall")
         # PID 1 exists already — the bootloader hands control to init later
         init = self.sched.fork_exec(0, "swapper/0", prio=100)
         init.state = Task.TASK_SLEEPING
@@ -667,11 +875,22 @@ SYSCALL_NAMES = [
     "brk", "munmap", "ioctl", "fork", "execve", "exit", "wait4", "kill",
     "getpid", "socket", "connect", "mount", "umount", "chdir", "time",
     "sched_yield", "clock_gettime", "panic",
+    # --- v2.1 additions -------------------------------------------------
+    "vfs_write",     # 26
+    "vfs_read",      # 27
+    "vfs_ls",        # 28
+    "vfs_rm",        # 29
+    "signal_send",   # 30  (sigqueue-style: pid, signum)
+    "signal_check",  # 31  (collect pending for a task)
+    "futex",         # 32  (op lock/unlock/stats)
+    "watchdog",      # 33  (op arm/pet/check/status)
+    "ports",         # 34  (port-matrix introspection)
 ]
 
 # The one and only entry point userland may use to reach ring 0.
 USER_SYSCALL_TABLE = frozenset({
     0, 1, 2, 7, 8, 9, 11, 12, 13, 14, 15, 16, 17, 20, 23, 24,
+    26, 27, 28, 29, 30, 31, 32, 33, 34,          # v2.1 (nr 25 stays privileged)
 })
 
 

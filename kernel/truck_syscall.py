@@ -35,6 +35,9 @@ class SyscallError(Exception):
     """Returned to userland as -errno instead of raising into the UI."""
 
 
+CURRENT_KERNEL = None      # last kernel seen by sysint (used by signals)
+
+
 # ------------------------------------------------------------- handlers
 def _require_running(k):
     if k.state != "running":
@@ -121,13 +124,20 @@ def sys_ioctl(k, cmd, arg=None):
 
 def sys_fork_exec(k, ppid, name, prio=120):
     _require_running(k)
-    t = k.sched.fork_exec(int(ppid), str(name), int(prio))
+    try:
+        ppid = int(ppid)
+        prio = int(prio)
+    except (TypeError, ValueError):
+        raise K.KernelFault(-22, "fork: ppid/prio must be integers")
+    if not 100 <= prio <= 139:
+        raise K.KernelFault(-22, f"fork: nice out of range (prio={prio})")
+    t = k.sched.fork_exec(ppid, str(name), prio)
     k.mm.add_task(t.pid)
     return t.pid
 
 
 def sys_execve(k, pid, argv0):
-    t = k.sched.tasks.get(int(pid))
+    t = k.sched.tasks.get(_pid_arg(pid))
     if t is None:
         return -3                       # -ESRCH
     t.name = str(argv0)[:20]
@@ -136,17 +146,19 @@ def sys_execve(k, pid, argv0):
 
 def sys_exit(k, pid, code=0):
     try:
-        t = k.sched.exit(int(pid), int(code))
+        t = k.sched.exit(_pid_arg(pid), int(code))
     except K.KernelFault as e:
         if e.errno == -3:                     # already reaped -> ESRCH, ok
             return 0
         raise
+    except (TypeError, ValueError):
+        return -22                            # bad code -> -EINVAL
     k.mm.del_task(t.pid)
     return 0
 
 
 def sys_wait4(k, pid):
-    t = k.sched.tasks.get(int(pid))
+    t = k.sched.tasks.get(_pid_arg(pid))
     if t is None:
         return -3
     if t.state == K.Task.TASK_ZOMBIE:
@@ -158,7 +170,7 @@ def sys_wait4(k, pid):
 
 
 def sys_kill(k, pid):
-    pid = int(pid)
+    pid = _pid_arg(pid)
     if pid == 1:
         # SIGKILL to init is ignored by the kernel (real-init semantics);
         # report success quietly instead of panicking the whole machine.
@@ -166,6 +178,10 @@ def sys_kill(k, pid):
     if not k.sched.kill(pid):
         return -3
     k.mm.del_task(pid)
+    k.signals.pending.pop(pid, None)          # drop queued signals
+    for key, owner in list(k.futex.locks.items()):
+        if owner == pid:                      # release locks of a dead task
+            del k.futex.locks[key]
     return 0
 
 
@@ -191,6 +207,116 @@ def sys_panic(k, msg="forced panic via sys_panic"):
     k.panic(str(msg))                    # never returns normally
 
 
+# --------------------------------------------------- v2.1: VFS / signals / sync
+def sys_vfs_write(k, path, data):
+    _require_running(k)
+    return k.vfs.write(path, data)
+
+
+def sys_vfs_read(k, path):
+    _require_running(k)
+    try:
+        return k.vfs.read(path).decode("utf-8", errors="replace")
+    except FileNotFoundError:
+        raise SyscallError(-2, f"vfs read: {path}: no such file")   # ENOENT
+
+
+def sys_vfs_ls(k, path="/tmp"):
+    _require_running(k)
+    try:
+        return k.vfs.ls(path)
+    except FileNotFoundError:
+        raise SyscallError(-2, f"vfs ls: {path}: no such directory")
+
+
+def sys_vfs_rm(k, path):
+    _require_running(k)
+    try:
+        return k.vfs.rm(path)
+    except FileNotFoundError:
+        raise SyscallError(-2, f"vfs rm: {path}: no such file")
+
+
+def sys_signal_send(k, pid, sig):
+    _require_running(k)
+    pid = _pid_arg(pid)
+    if not isinstance(sig, int) or isinstance(sig, bool):
+        raise SyscallError(-22, f"kill: bad signal {sig!r}")
+    try:
+        return 0 if k.signals.send(pid, sig) else -1     # EPERM for init
+    except K.KernelFault as e:
+        return e.errno
+
+
+def sys_signal_check(k, pid):
+    """Collect pending signals for a task (like sigpending+sigaction run)."""
+    _require_running(k)
+    pid = _pid_arg(pid)
+    pend = k.signals.collect(pid)
+    out = []
+    for s in pend:
+        name = K.SIG_NAMES.get(s, str(s))
+        t = k.sched.tasks.get(pid)
+        if t is not None and s in t.signal_mask and s not in \
+                K.SignalRegistry.UNBLOCKABLE:
+            out.append(f"{name}(blocked)")
+            k.signals.pending.setdefault(pid, set()).add(s)   # requeue
+        else:
+            out.append(name)
+    return out
+
+
+def sys_futex(k, op, key=None, pid=0):
+    _require_running(k)
+    try:
+        if op == "lock":
+            return 0 if k.futex.try_lock(key, pid) else -11      # EAGAIN
+        if op == "unlock":
+            return 0 if k.futex.unlock(key, pid) else -1
+        if op == "stats":
+            return {"held": len(k.futex.locks),
+                    "contended": k.futex.contended}
+    except K.KernelFault as e:
+        return e.errno
+    raise SyscallError(-22, f"ioctl futex: bad op {op!r}")
+
+
+def sys_watchdog(k, op):
+    _require_running(k)
+    if op == "arm":
+        k.watchdog.arm()
+        return 0
+    if op == "pet":
+        k.watchdog.pet()
+        return 0
+    if op == "check":
+        return 0 if k.watchdog.check() else -62     # ETIMEDOUT -> recover
+    if op == "status":
+        return {"armed": k.watchdog.armed,
+                "expirations": k.watchdog.expirations,
+                "timeout_sec": k.watchdog.timeout}
+    raise SyscallError(-22, f"watchdog: bad op {op!r}")
+
+
+def sys_ports(k, query=None):
+    """Port-matrix introspection for the UI (`ports` command)."""
+    _require_running(k)
+    try:
+        from .porting import PORT_MATRIX, certification_report
+    except ImportError:
+        raise SyscallError(-38, "porting layer not available")   # ENOSYS
+    if query == "summary":
+        return PORT_MATRIX.summary()
+    if query == "report":
+        return certification_report()
+    if query is None:
+        return [t.id for t in PORT_MATRIX.all_targets()]
+    t = PORT_MATRIX.find(str(query))
+    if t is None:
+        raise SyscallError(-2, f"no such port target: {query}")   # ENOENT
+    return vars(t)
+
+
 SYSCALL_TABLE = {
     0: ("read", sys_read),
     1: ("write", sys_write),
@@ -208,6 +334,16 @@ SYSCALL_TABLE = {
     20: ("time", sys_time),
     23: ("sched_yield", sched_yield_),
     24: ("clock_gettime", sys_clock_gettime),
+    # --- v2.1: VFS / signals / sync / watchdog / ports ------------------
+    26: ("vfs_write", sys_vfs_write),
+    27: ("vfs_read", sys_vfs_read),
+    28: ("vfs_ls", sys_vfs_ls),
+    29: ("vfs_rm", sys_vfs_rm),
+    30: ("signal_send", sys_signal_send),
+    31: ("signal_check", sys_signal_check),
+    32: ("futex", sys_futex),
+    33: ("watchdog", sys_watchdog),
+    34: ("ports", sys_ports),
     # nr 25 (panic) is deliberately NOT in the user-reachable table —
     # see USER_SYSCALL_TABLE in truck_kernel.  Only kernel-internal code
     # may call k.panic() directly; userland cannot crash ring 0.
@@ -222,6 +358,8 @@ def sysint(nr, *args, kernel=None):
     A genuine ring-0 fault prints a kernel oops and raises KernelPanic.
     """
     k = kernel or K.default_kernel()
+    global CURRENT_KERNEL
+    CURRENT_KERNEL = k                        # so SignalRegistry can find tasks
     k.tick()                                   # let timer IRQs accrue
     k.syscall_count += 1
     if nr not in K.USER_SYSCALL_TABLE:
