@@ -94,6 +94,13 @@ def _read_manifest(name):
 
 
 def _fetch(url, timeout=30):
+    """Fetch a URL — only http/https are allowed.
+
+    Blocking file://, ftp:// and custom schemes prevents local-file reads
+    through repo/package URLs (SSRF-style path disclosure).
+    """
+    if not url.startswith(("http://", "https://")):
+        raise ValueError(f"trk: refused non-http(s) URL: {url!r}")
     req = urllib.request.Request(url, headers={"User-Agent": "trk/1.0"})
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return r.read()
@@ -147,11 +154,18 @@ def cmd_install(spec, force=False, trust=False):
         manifest = hits[0]
         # if the repo entry points at a full .trkpkg, fetch it
         if manifest.get("package_url"):
-            manifest = json.loads(_fetch(manifest["package_url"]))
+            pkg_url = manifest["package_url"]
+            if not pkg_url.startswith(("http://", "https://", "/")):
+                print("trk: refusing non-http package_url.")
+                return 1
+            manifest = json.loads(_fetch(pkg_url))
 
     name = manifest.get("name", "").strip()
-    if not name:
-        print("trk: invalid manifest (missing name).")
+    # hardening: names must be plain single filename components — blocks
+    # '../'-traversal into the truck root and absolute-path DB escapes
+    if (not name or os.path.sep in name or (os.altsep and os.altsep in name)
+            or name in (".", "..") or os.path.isabs(name)):
+        print(f"trk: invalid package name {name!r}.")
         return 1
     if manifest.get("trust", "untrusted") == "untrusted" and not trust \
             and not force:
@@ -165,9 +179,13 @@ def cmd_install(spec, force=False, trust=False):
         return 0
 
     os.makedirs(os.path.join(dest, "files"), exist_ok=True)
+    files_root = os.path.abspath(dest)
     for fname, content in manifest.get("files", {}).items():
         target = os.path.normpath(os.path.join(dest, "files", fname))
-        if not target.startswith(os.path.abspath(dest)):
+        # robust containment check: exact prefix OR separator boundary
+        if (os.path.isabs(fname)
+                or not (target == files_root
+                        or target.startswith(files_root + os.sep))):
             print(f"trk: refusing path traversal in '{fname}'.")
             shutil.rmtree(dest, ignore_errors=True)
             return 1
@@ -176,7 +194,13 @@ def cmd_install(spec, force=False, trust=False):
             f.write(content)
     # downloaded blobs
     for url, fname in manifest.get("downloads", {}).items():
-        target = os.path.join(dest, "files", fname)
+        target = os.path.normpath(os.path.join(dest, "files", fname))
+        if (os.path.isabs(fname)
+                or not (target == files_root
+                        or target.startswith(files_root + os.sep))):
+            print(f"trk: refusing path traversal in download '{fname}'.")
+            shutil.rmtree(dest, ignore_errors=True)
+            return 1
         os.makedirs(os.path.dirname(target), exist_ok=True)
         print(f"  fetching {url} ...")
         with open(target, "wb") as f:
@@ -192,7 +216,11 @@ def cmd_install(spec, force=False, trust=False):
     # expose entry script in trk's own /usr/bin
     entry = manifest.get("entry")  # filename inside files/
     if entry:
-        src = os.path.join(dest, "files", entry)
+        src = os.path.normpath(os.path.join(dest, "files", entry))
+        if not src.startswith(files_root + os.sep):
+            print(f"trk: refusing path traversal in entry '{entry}'.")
+            shutil.rmtree(dest, ignore_errors=True)
+            return 1
         link = os.path.join(_bin_dir(), name)
         shutil.copyfile(src, link)
         _make_exec(link)
@@ -203,6 +231,9 @@ def cmd_install(spec, force=False, trust=False):
 
 
 def cmd_remove(name):
+    if not name or os.path.sep in name or name in (".", ".."):
+        print(f"trk: invalid package name {name!r}.")
+        return 1
     dest = os.path.join(_db_dir(), name)
     if not os.path.isdir(dest):
         print(f"trk: '{name}' is not installed.")

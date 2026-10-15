@@ -26,6 +26,23 @@ from servercloud.truck_modules import trk
 from servercloud.kernel import truck_init, truck_kernel
 from servercloud.truck_modules.sysconfig import SysConfig
 
+# sanity bounds for kernel tuning coming from the (user-editable) config
+RAM_MB_RANGE = (8, 4096)          # virtual RAM in MiB
+NCPU_RANGE = (1, 64)
+HZ_RANGE = (10, 1000)
+
+
+def _bounded(val, lo, hi, fallback, name):
+    try:
+        v = int(val)
+    except (TypeError, ValueError):
+        print(f"boot: invalid {name}={val!r}, using {fallback}")
+        return fallback
+    if not lo <= v <= hi:
+        print(f"boot: {name}={v} out of range [{lo},{hi}], using {fallback}")
+        return fallback
+    return v
+
 BOOTLOGO = r"""
   _____                         _  ___        ___
  |_   _|_ __ _   _ _ __| | ___| |/ _ \      / _ \/ ___
@@ -103,11 +120,16 @@ def _menu(timeout):
 
 def _load_kernel(cfg):
     """Bootloader stage: jump into the simulated ring-0 kernel."""
-    ram_mb = int(cfg.get("kernel_ram_mb", 64))
-    k = truck_kernel.Kernel(hostname=cfg.get("hostname", "truck-os"),
-                            ncpu=int(cfg.get("kernel_ncpu", 2)),
+    ram_mb = _bounded(cfg.get("kernel_ram_mb", 64), *RAM_MB_RANGE,
+                      fallback=64, name="kernel_ram_mb")
+    ncpu = _bounded(cfg.get("kernel_ncpu", 2), *NCPU_RANGE,
+                    fallback=2, name="kernel_ncpu")
+    hz = _bounded(cfg.get("kernel_hz", truck_kernel.HZ_DEFAULT), *HZ_RANGE,
+                  fallback=truck_kernel.HZ_DEFAULT, name="kernel_hz")
+    hostname = str(cfg.get("hostname", "truck-os"))[:64]
+    k = truck_kernel.Kernel(hostname=hostname, ncpu=ncpu,
                             ram_bytes=ram_mb << 20)
-    k.hz = int(cfg.get("kernel_hz", truck_kernel.HZ_DEFAULT))
+    k.hz = hz
     print(f"\nboot: loading kernel image vmlinuz-{truck_kernel.KERNEL_VERSION}"
           f" ({ram_mb} MiB virtual RAM) ...")
     k.start()

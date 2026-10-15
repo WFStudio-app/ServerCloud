@@ -20,8 +20,10 @@ Useful numbers (see SYSCALL_TABLE):
  12  sys_fork_exec(ppid,name)  spawn a simulated task
  13  sys_execve                register the running program name
  14  sys_exit(pid, code)       reap a task
- 16  sys_kill(pid)             deliver SIGKILL
- 25  sys_panic(msg)            deliberate ring-0 crash (for demos/tests)
+ 16  sys_kill(pid)             deliver SIGKILL (ignored for PID 1, like init)
+ 25  (privileged) panic is NOT user-callable any more: the gate returns
+     -ENOSYS, so userland can never crash ring 0 on purpose.  Kernel-internal
+     demos/tests call truck_kernel.Kernel.panic() directly.
 """
 
 import time
@@ -48,6 +50,9 @@ def sys_read(k, path):
 
 def sys_write(k, fd, data):
     _require_running(k)
+    data = str(data)
+    if len(data) > 64 * 1024:                 # bound kernel-log writes (DoS)
+        raise K.KernelFault(-27, "write too large")
     if fd == 2:
         k._klog("USER", data)
     else:
@@ -64,16 +69,34 @@ def sys_open(k, path):
     return 3                            # fake fd, like a real syscall would
 
 
+def _pid_arg(pid):
+    """Validate a userland-supplied pid before it touches ring-0 state."""
+    try:
+        return int(pid)
+    except (TypeError, ValueError):
+        raise K.KernelFault(-22, f"not a valid pid: {pid!r}")
+
+
 def sys_mmap(k, pid, length):
     _require_running(k)
+    pid = _pid_arg(pid)
+    try:
+        length = int(length)
+    except (TypeError, ValueError):
+        raise K.KernelFault(-22, f"mmap: invalid length {length!r}")
     k.mm.add_task(pid)                  # idempotent
-    return k.mm.do_mmap(pid, int(length))
+    return k.mm.do_mmap(pid, length)
 
 
 def sys_brk(k, pid, size):
     _require_running(k)
+    pid = _pid_arg(pid)
+    try:
+        size = int(size)
+    except (TypeError, ValueError):
+        raise K.KernelFault(-22, f"brk: invalid size {size!r}")
     k.mm.add_task(pid)
-    return k.mm.brk_grow(pid, int(size))
+    return k.mm.brk_grow(pid, size)
 
 
 def sys_ioctl(k, cmd, arg=None):
@@ -112,7 +135,12 @@ def sys_execve(k, pid, argv0):
 
 
 def sys_exit(k, pid, code=0):
-    t = k.sched.exit(int(pid), int(code))
+    try:
+        t = k.sched.exit(int(pid), int(code))
+    except K.KernelFault as e:
+        if e.errno == -3:                     # already reaped -> ESRCH, ok
+            return 0
+        raise
     k.mm.del_task(t.pid)
     return 0
 
@@ -123,14 +151,21 @@ def sys_wait4(k, pid):
         return -3
     if t.state == K.Task.TASK_ZOMBIE:
         del k.sched.tasks[t.pid]
+        k.mm.add_task(t.pid)                  # ensure vmas dict exists
+        k.mm.del_task(t.pid)                  # free any lingering pages
         return t.exit_code
     return None                          # would block in a real kernel
 
 
 def sys_kill(k, pid):
-    if not k.sched.kill(int(pid)):
+    pid = int(pid)
+    if pid == 1:
+        # SIGKILL to init is ignored by the kernel (real-init semantics);
+        # report success quietly instead of panicking the whole machine.
+        return 0
+    if not k.sched.kill(pid):
         return -3
-    k.mm.del_task(int(pid))
+    k.mm.del_task(pid)
     return 0
 
 
@@ -173,7 +208,9 @@ SYSCALL_TABLE = {
     20: ("time", sys_time),
     23: ("sched_yield", sched_yield_),
     24: ("clock_gettime", sys_clock_gettime),
-    25: ("panic", sys_panic),
+    # nr 25 (panic) is deliberately NOT in the user-reachable table —
+    # see USER_SYSCALL_TABLE in truck_kernel.  Only kernel-internal code
+    # may call k.panic() directly; userland cannot crash ring 0.
 }
 
 
@@ -187,15 +224,19 @@ def sysint(nr, *args, kernel=None):
     k = kernel or K.default_kernel()
     k.tick()                                   # let timer IRQs accrue
     k.syscall_count += 1
-    entry = SYSCALL_TABLE.get(nr)
-    if entry is None:
-        # -ENOSYS, exactly like an unknown vector on a real kernel
+    if nr not in K.USER_SYSCALL_TABLE:
+        # -ENOSYS for unknown vectors AND for privileged numbers such as
+        # 25/sys_panic: userland must never be able to panic the kernel.
         return -38
-    name, fn = entry
+    name, fn = SYSCALL_TABLE[nr]
     try:
         return fn(k, *args)
     except SyscallError as e:
         return e.args[0]                        # already -errno
+    except K.KernelFault as e:
+        # recoverable ring-0 fault (-ENOMEM / -EINVAL / -EAGAIN / SIGSEGV):
+        # deliver the errno to userland, keep the kernel alive
+        return e.errno
     except K.KernelPanic:
         raise                                   # caller shows the oops
     except Exception as exc:                    # noqa: BLE001

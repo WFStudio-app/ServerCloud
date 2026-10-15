@@ -54,8 +54,17 @@ class Slab(unittest.TestCase):
         self.assertNotEqual(a, b)
         k.slab.kfree(a)
         k.slab.kfree(b)
-        with self.assertRaises(K.KernelPanic):
-            k.slab.kfree(a)                   # double free
+        with self.assertRaises(K.PhysMem.OutOfMemory):
+            k.slab.kfree(a)                   # double free -> recoverable fault
+
+    def test_slab_backed_by_real_pages(self):
+        """kmalloc must consume physical frames (no phantom RAM)."""
+        k = fresh_kernel()
+        free0 = k.phys.npages_free
+        objs = [k.slab.kmalloc(512) for _ in range(8)]   # 8*512 = one page
+        self.assertLess(k.phys.npages_free, free0)
+        for o in objs:
+            k.slab.kfree(o)
 
 
 class VirtualMemory(unittest.TestCase):
@@ -69,10 +78,27 @@ class VirtualMemory(unittest.TestCase):
         k.mm.translate(pid, va)               # should hit TLB now
         self.assertEqual(k.mm.tlb_hits, hits_before + 1)
 
-    def test_bad_address_panics(self):
+    def test_bad_address_is_segfault_not_panic(self):
+        """Unmapped access = SIGSEGV (-EFAULT), the kernel stays alive."""
         k = fresh_kernel()
-        with self.assertRaises(K.KernelPanic):
+        with self.assertRaises(K.KernelFault) as cm:
             k.mm.translate(999, 0x1234_0000)
+        self.assertEqual(cm.exception.errno, -14)
+        self.assertEqual(k.state, "running")
+
+    def test_huge_mmap_returns_enomem_not_panic(self):
+        """Userland must not be able to OOM-panic ring 0 via mmap."""
+        k = fresh_kernel()
+        pid = S.sysint(12, 1, "hog", kernel=k)
+        rc = S.sysint(7, pid, 10 ** 12, kernel=k)     # 1 TB request
+        self.assertEqual(rc, -12)                     # -ENOMEM
+        self.assertEqual(k.state, "running")          # kernel survived
+
+    def test_negative_brk_rejected(self):
+        k = fresh_kernel()
+        pid = S.sysint(12, 1, "neg", kernel=k)
+        self.assertEqual(S.sysint(9, pid, -100, kernel=k), -22)  # -EINVAL
+        self.assertEqual(k.state, "running")
 
 
 class SyscallGate(unittest.TestCase):
@@ -97,10 +123,29 @@ class SyscallGate(unittest.TestCase):
         self.assertEqual(S.sysint(15, pid, kernel=k), 3)   # reaped exit code
         self.assertNotIn(pid, k.sched.tasks)
 
-    def test_kill_init_panics(self):
+    def test_kill_init_is_ignored(self):
+        """SIGKILL to PID 1 is ignored like real init — never panics."""
         k = fresh_kernel()
-        with self.assertRaises(K.KernelPanic):
-            S.sysint(16, 1, kernel=k)
+        self.assertEqual(S.sysint(16, 1, kernel=k), 0)
+        self.assertIn(1, k.sched.tasks)
+        self.assertEqual(k.state, "running")
+
+    def test_panic_not_user_callable(self):
+        """nr 25 was removed from the user syscall table: -ENOSYS."""
+        k = fresh_kernel()
+        self.assertEqual(S.sysint(25, "boom", kernel=k), -38)
+        self.assertEqual(k.state, "running")
+
+    def test_fork_bomb_capped(self):
+        """Process-table limit turns a fork bomb into -EAGAIN, not a crash."""
+        k = fresh_kernel()
+        k.sched.MAX_TASKS = 50
+        rcs = set()
+        for _ in range(100):
+            rcs.add(S.sysint(12, 1, "bomb", kernel=k))
+        self.assertIn(-11, rcs)                 # -EAGAIN once table is full
+        self.assertLessEqual(len(k.sched.tasks), 50)
+        self.assertEqual(k.state, "running")
 
     def test_ioctl_stats_ps(self):
         k = fresh_kernel()
@@ -117,10 +162,11 @@ class PanicHandler(unittest.TestCase):
             k.panic("test panic")
         self.assertEqual(k.state, "panicked")
 
-    def test_unhandled_fault_oops(self):
+    def test_garbage_path_is_enoent_not_oops(self):
+        """Non-string path from userland: graceful miss, kernel survives."""
         k = fresh_kernel()
-        with self.assertRaises(K.KernelPanic):
-            S.sysint(0, 12345, kernel=k)     # non-string path -> ring-0 fault
+        self.assertIsNone(S.sysint(0, 12345, kernel=k))
+        self.assertEqual(k.state, "running")
 
 
 if __name__ == "__main__":

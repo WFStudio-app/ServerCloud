@@ -47,6 +47,15 @@ class KernelPanic(RuntimeError):
     """Ring-0 fatal error.  The syscall gate catches this and shows the oops."""
 
 
+class KernelFault(Exception):
+    """Recoverable ring-0 fault: carries -errno back to userland, like a
+    real syscall returning -EFAULT/-EINVAL instead of crashing the box."""
+
+    def __init__(self, errno_neg, message=""):
+        super().__init__(message)
+        self.errno = errno_neg
+
+
 # --------------------------------------------------------------- e820 / memmap
 class PhysMem:
     """E820-style physical memory map over a bytearray 'RAM'."""
@@ -77,9 +86,17 @@ class PhysMem:
                          f"] {e['type']}")
         return "\n".join(lines)
 
+    class OutOfMemory(Exception):
+        """Recoverable allocation failure -> userland gets -ENOMEM."""
+
     # ---- buddy-ish page allocator -------------------------------------
     def alloc_pages(self, order=0, zero=True):
-        """Return list of 2**order contiguous page frames (PFNs)."""
+        """Return list of 2**order contiguous page frames (PFNs).
+
+        Raises OutOfMemory (recoverable) instead of panicking: a user
+        process must never be able to take the whole kernel down by
+        exhausting memory — real kernels return -ENOMEM.
+        """
         want = 1 << order
         bm, total = self.bitmap, self.npages_total
         run = 0
@@ -101,11 +118,15 @@ class PhysMem:
                         self.ram[base + off: base + off + PAGE_SIZE] = \
                             bytes(PAGE_SIZE)
                 return list(range(start, start + want))
-        raise KernelPanic(f"out of memory: order={order} requested, "
-                          f"{self.npages_free} pages free")
+        raise PhysMem.OutOfMemory(
+            f"out of memory: order={order} requested, "
+            f"{self.npages_free} pages free")
 
     def free_pages(self, pfns):
         for pfn in pfns:
+            if not 0 <= pfn < self.npages_total:
+                raise KernelPanic(f"free_pages: pfn {pfn} out of range "
+                                  f"[0,{self.npages_total})")
             b, i = divmod(pfn, 8)
             if not self.bitmap[b] & (1 << i):
                 raise KernelPanic(f"double-free detected on pfn {pfn}")
@@ -113,23 +134,39 @@ class PhysMem:
         self.npages_free += len(pfns)
 
     def read(self, addr, n):
+        if addr < 0 or n < 0 or addr + n > self.size:
+            raise KernelPanic(f"phys read out of bounds: {_hex(addr)}+{n}")
         return bytes(self.ram[addr: addr + n])
 
     def write(self, addr, data):
+        if addr < 0 or addr + len(data) > self.size:
+            raise KernelPanic(f"phys write out of bounds: {_hex(addr)}"
+                              f"+{len(data)}")
         self.ram[addr: addr + len(data)] = data
 
 
 # ------------------------------------------------------------------- slab
 class KmallocSlab:
-    """kmalloc-style heap carved out of kernel pages, with size-class caches."""
+    """kmalloc-style heap carved out of kernel pages, with size-class caches.
+
+    Security/robustness properties:
+      * every object is actually backed by real physical frames (the slab
+        arena grows page-by-page from the buddy allocator — no phantom RAM)
+      * a hard budget cap prevents unbounded kernel-heap growth (DoS)
+      * kfree validates ownership; double-free / bogus pointers are caught
+    """
 
     CLASSES = [32, 64, 128, 256, 512, 1024, 2048, 4096]
+    MAX_LIVE_BYTES = 16 * 1024 * 1024          # 16 MiB kernel-heap budget
 
     def __init__(self, phys):
         self.phys = phys
-        self.objects = {}          # addr -> (size_class or ('page', n))
+        self.objects = {}          # addr -> ("slab", cl) | ("page", order, pfns)
         self.next_addr = KERNEL_VA_BASE + 0x1000
         self.stats = {"alloc": 0, "free": 0, "live": 0, "bytes_live": 0}
+        # slab arenas: list of frame lists, each arena == one physical page
+        self._arenas = []
+        self._arena_off = PAGE_SIZE   # force first refill
 
     def _class_for(self, size):
         for c in self.CLASSES:
@@ -137,9 +174,19 @@ class KmallocSlab:
                 return c
         return None
 
+    def _refill_arena(self):
+        """Carve a fresh 4 KiB physical page for small-object slicing."""
+        pfns = self.phys.alloc_pages(0)
+        self._arenas.append(pfns)
+        self._arena_off = 0
+
     def kmalloc(self, size):
-        if size <= 0:
-            raise KernelPanic(f"kmalloc({size}): invalid size")
+        if size <= 0 or size > self.MAX_LIVE_BYTES:
+            raise PhysMem.OutOfMemory(f"kmalloc({size}): invalid or over "
+                                      f"budget ({self.MAX_LIVE_BYTES})")
+        if self.stats["bytes_live"] + size > self.MAX_LIVE_BYTES:
+            raise PhysMem.OutOfMemory(
+                f"kmalloc({size}): kernel heap budget exhausted")
         self.stats["alloc"] += 1
         cl = self._class_for(size)
         if cl is None:                                    # big allocation
@@ -151,6 +198,8 @@ class KmallocSlab:
             self.next_addr += (1 << order) * PAGE_SIZE
             self.objects[addr] = ("page", order, pfns)
         else:
+            if self._arena_off + cl > PAGE_SIZE:
+                self._refill_arena()
             addr = self.next_addr
             self.next_addr += cl
             self.objects[addr] = ("slab", cl)
@@ -161,12 +210,15 @@ class KmallocSlab:
     def kfree(self, addr):
         obj = self.objects.pop(addr, None)
         if obj is None:
-            raise KernelPanic(f"kfree({_hex(addr)}): invalid pointer / "
-                              f"already freed")
+            # recoverable: userland gets -EINVAL, not a panic
+            raise PhysMem.OutOfMemory(
+                f"kfree({_hex(addr)}): invalid pointer / already freed")
         if obj[0] == "page":
             self.phys.free_pages(obj[2])
         self.stats["free"] += 1
         self.stats["live"] -= 1
+        self.stats["bytes_live"] -= (obj[1] if obj[0] == "slab"
+                                     else (1 << obj[1]) * PAGE_SIZE)
 
     def live_bytes(self):
         return sum(o[1] if o[0] == "slab" else (1 << o[1]) * PAGE_SIZE
@@ -180,6 +232,9 @@ class VMManager:
     PROT_READ, PROT_WRITE, PROT_EXEC = 1, 2, 4
     FLAGS_SHARED = 1
 
+    MAX_TASK_PAGES = 8 * 1024          # 32 MiB of frames per task (rlimit-ish)
+    MAX_VA_SPAN = 1 << 40              # sanity cap on pid-derived VA bases
+
     def __init__(self, phys):
         self.phys = phys
         self.vmas = {}            # task_pid -> list of VMA dicts
@@ -190,19 +245,35 @@ class VMManager:
         self.page_faults = 0
 
     def add_task(self, pid):
-        self.vmas[pid] = []
+        self.vmas.setdefault(pid, [])
 
     def del_task(self, pid):
         for vma in self.vmas.pop(pid, []):
             self.phys.free_pages(vma["pages"])
 
+    def _task_pages(self, pid):
+        return sum(len(v["pages"]) for v in self.vmas.get(pid, ()))
+
     def do_mmap(self, pid, length, prot=3, flags=0, addr=None):
+        if not isinstance(length, int) or length <= 0:
+            raise KernelFault(-22, f"mmap: invalid length {length!r}")
         npages = (length + PAGE_SIZE - 1) // PAGE_SIZE
+        if self._task_pages(pid) + npages > self.MAX_TASK_PAGES:
+            raise KernelFault(-12, "mmap: exceeds per-task address-space "
+                                   "limit (RLIMIT-like)")
         start = USER_VA_START + pid * 0x1000_0000
+        if start >= KERNEL_VA_BASE or start < USER_VA_START:
+            raise KernelFault(-12, "mmap: virtual address space exhausted")
         for vma in self.vmas[pid]:                     # bump allocator
             start = max(start, vma["end"])
         start = (start + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1)
-        pages = [self.phys.alloc_pages(0)[0] for _ in range(npages)]
+        pages = []
+        try:
+            for _ in range(npages):                    # partial-failure safe
+                pages.append(self.phys.alloc_pages(0)[0])
+        except PhysMem.OutOfMemory as e:
+            self.phys.free_pages(pages)                # roll back cleanly
+            raise KernelFault(-12, f"mmap: {e}")
         self.vmas[pid].append({"start": start, "end": start + npages * PAGE_SIZE,
                                "prot": prot, "flags": flags,
                                "pages": pages})
@@ -210,14 +281,28 @@ class VMManager:
 
     def brk_grow(self, pid, extra):
         # emulate heap growth: one anonymous VMA per task
+        if not isinstance(extra, int) or extra < 0:
+            raise KernelFault(-22, f"brk: invalid size {extra!r}")
         for vma in self.vmas[pid]:
             if vma.get("heap"):
                 need = (extra + PAGE_SIZE - 1) // PAGE_SIZE
                 have = len(vma["pages"])
-                for _ in range(need - have):
-                    vma["pages"].append(self.phys.alloc_pages(0)[0])
+                if need > have:
+                    grow = need - have
+                    if self._task_pages(pid) + grow > self.MAX_TASK_PAGES:
+                        raise KernelFault(-12, "brk: exceeds per-task limit")
+                    new = []
+                    try:
+                        for _ in range(grow):
+                            new.append(self.phys.alloc_pages(0)[0])
+                    except PhysMem.OutOfMemory as e:
+                        self.phys.free_pages(new)      # roll back
+                        raise KernelFault(-12, f"brk: {e}")
+                    vma["pages"].extend(new)
                 vma["end"] = vma["start"] + len(vma["pages"]) * PAGE_SIZE
                 return vma["end"]
+        if extra == 0:
+            return USER_VA_START + pid * 0x1000_0000      # query current brk
         start = self.do_mmap(pid, extra)
         self.vmas[pid][-1]["heap"] = True
         return start
@@ -241,8 +326,10 @@ class VMManager:
                 if len(self.tlb) > self.tlb_size:
                     self.tlb.pop(0)
                 return frame
-        raise KernelPanic(f"page fault at {_hex(va)} (pid {pid}): "
-                          f"no such mapping — SIGSEGV")
+        # An unmapped access is a SEGFAULT delivered to the *process*,
+        # not a kernel bug: recoverable fault (-EFAULT), never a panic.
+        raise KernelFault(-14, f"page fault at {_hex(va)} (pid {pid}): "
+                               f"no such mapping — SIGSEGV")
 
     def vmstat(self):
         return {"tlb_entries": len(self.tlb), "tlb_hits": self.tlb_hits,
@@ -295,7 +382,14 @@ class Scheduler:
         self.context_switches = 0
         self.ticks = 0
 
+    MAX_TASKS = 4096                          # pid-table size (fork bomb cap)
+
     def fork_exec(self, ppid, name, prio=120):
+        if len(self.tasks) >= self.MAX_TASKS:
+            # EAGAIN like a real kernel hitting its pid limit: this is what
+            # stops a user-side fork bomb from eating all RAM/CPU forever.
+            raise KernelFault(-11, f"fork: process table full "
+                                   f"({self.MAX_TASKS} tasks)")
         pid = self.next_pid
         self.next_pid += 1
         t = Task(pid, ppid, name, prio)
@@ -336,7 +430,9 @@ class Scheduler:
     def exit(self, pid, code=0):
         t = self.tasks.get(pid)
         if t is None:
-            raise KernelPanic(f"exit({pid}): no such task")
+            # -ESRCH to userland; exiting a task that does not exist must
+            # never crash the kernel.
+            raise KernelFault(-3, f"exit({pid}): no such task")
         t.state = Task.TASK_ZOMBIE
         t.exit_code = code
         return t
@@ -346,7 +442,9 @@ class Scheduler:
         if t is None:
             return False
         if t.pid == 1:
-            raise KernelPanic("attempted to kill init!")
+            # PID 1 protection: SIGKILL is simply ignored (like real init),
+            # not a kernel panic.  Only an explicit shutdown() may stop it.
+            return False
         del self.tasks[pid]
         return True
 
@@ -375,6 +473,10 @@ class ProcFs:
 
     def read(self, path):
         k = self.k
+        if not isinstance(path, str):
+            # userland can hand us garbage: report -ENOENT-style miss,
+            # never let a TypeError bubble up into an oops
+            raise FileNotFoundError(repr(path))
         p = path.rstrip("/") or "/proc"
         if p == "/proc/version":
             return (f"{KERNEL_NAME} version {KERNEL_VERSION} "
@@ -518,11 +620,11 @@ class Kernel:
     # ------------------------------------------------------------- panics
     def panic(self, message, cause=None):
         self.state = "panicked"
-        frames = [f"  <TASK>",
-                  f"  ? truck_panic+0x42/0x100",
+        frames = ["  <TASK>",
+                  "  ? truck_panic+0x42/0x100",
                   f"  ? syscall_dispatch+0x{self.syscall_count % 256:02x}/0x1f0",
-                  f"  ? truck_init_main+0x1b/0x40 [init]",
-                  f"  </TASK>"]
+                  "  ? truck_init_main+0x1b/0x40 [init]",
+                  "  </TASK>"]
         self._panic_trace = frames
         banner = ("  ------------------------------------------------------------"
                   "\n  Kernel panic - not syncing: " + message)
@@ -566,6 +668,11 @@ SYSCALL_NAMES = [
     "getpid", "socket", "connect", "mount", "umount", "chdir", "time",
     "sched_yield", "clock_gettime", "panic",
 ]
+
+# The one and only entry point userland may use to reach ring 0.
+USER_SYSCALL_TABLE = frozenset({
+    0, 1, 2, 7, 8, 9, 11, 12, 13, 14, 15, 16, 17, 20, 23, 24,
+})
 
 
 def default_kernel():
