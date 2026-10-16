@@ -47,9 +47,10 @@ ${MIRROR}/v${ALPINE_RELEASE}/community
 EOF
 cp /etc/apk/keys/*.pub "${ROOTFS}/etc/apk/keys/" 2>/dev/null || true
 
-PKGS="python3 py3-pip openrc busybox-initscripts shadow curl git bash"
+PKGS="python3 py3-pip openrc shadow curl git bash"
+COMMUNITY_PKGS="community/busybox-initscripts"
 [ "$MINIMAL" = 1 ] && PKGS="python3 openrc"
-$SUDO apk --root "${ROOTFS}" add --no-cache $PKGS
+$SUDO apk --root "${ROOTFS}" add --no-cache $PKGS $COMMUNITY_PKGS
 
 echo "==> [4/5] Installing ServerCloud / TruckOS into the rootfs"
 $SUDO mkdir -p "${ROOTFS}/opt/servercloud" "${ROOTFS}/var/lib/servercloud" "${ROOTFS}/var/log/servercloud"
