@@ -17,12 +17,20 @@ def base_url() -> str:
 
 
 def _request(path: str, payload=None, timeout=30):
+    """Open an HTTP request and return the LIVE response object.
+
+    BUGFIX: previously this returned the response from INSIDE a `with`
+    block — the context manager closed the socket on return, so every
+    caller that re-entered `with resp:` hit
+    "ValueError: I/O operation on closed file" and Ollama looked dead
+    even when it was running (forced demo mode). Callers are responsible
+    for closing the returned response (they all use `with _request(...)`).
+    """
     url = base_url() + path
     data = json.dumps(payload).encode() if payload is not None else None
     req = urllib.request.Request(url, data=data,
                                  headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return resp
+    return urllib.request.urlopen(req, timeout=timeout)
 
 
 def is_alive() -> bool:
