@@ -49,3 +49,7 @@ tests/test_sections_compute_network.py   8 tests: quantize roundtrip, lossless c
                                          modes/journal, DNS/proxy/vault, TRK-35 == 35 chars,
                                          dual-pane monitor, token hook, resilient generation
 Full suite: 91 passed
+
+[SSLGEN] «Генерация ССЛ» — compute mode (servercloud/modules/compute.py)
+  spec: len=<N> && charset=<letters|digits|mixed> && lines=<1..1e12>
+  CLI:  /sslgen <spec> · menu [5] -> [8]; streams to ~/.servercloud/sslgen_*.txt

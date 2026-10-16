@@ -31,6 +31,8 @@ Container formats (self-describing headers):
 """
 
 import os
+import secrets
+import string
 import struct
 import threading
 import time
@@ -46,9 +48,11 @@ MODE_CLUSTER = "cluster"    # spread across fused devices (modules.cluster)
 MODE_ENERGY = "energy"      # throttle to ~25 % duty cycle
 MODE_TURBO = "turbo"        # all cores, no sleep between blocks
 MODE_SAFE = "safe"          # checksum every block, abort on mismatch
+MODE_SSLGEN = "sslgen"      # «Генерация ССЛ»: bulk random-string generator
 
 DEFAULT_MODES = [MODE_AUTO, MODE_CPU, MODE_GPU, MODE_BATCH, MODE_REALTIME,
-                 MODE_CLUSTER, MODE_ENERGY, MODE_TURBO, MODE_SAFE]
+                 MODE_CLUSTER, MODE_ENERGY, MODE_TURBO, MODE_SAFE,
+                 MODE_SSLGEN]
 
 MODE_INFO = {
     MODE_AUTO:     ("AUTO", "best device per job"),
@@ -60,7 +64,84 @@ MODE_INFO = {
     MODE_ENERGY:   ("ENERGY", "25% duty cycle"),
     MODE_TURBO:    ("TURBO", "all cores, zero pause"),
     MODE_SAFE:     ("SAFE", "per-block checksums"),
+    MODE_SSLGEN:   ("SSLGEN", "«Генерация ССЛ»: charset/length/count via &&"),
 }
+
+# ---------------------------------------------------------------- sslgen
+MAX_SSLGEN_LINES = 1_000_000_000_000        # 1 trillion lines per run
+
+SSL_ALPHABETS = {
+    "letters": string.ascii_letters,               # a-zA-Z
+    "alpha":   string.ascii_letters,               # alias
+    "digits":  string.digits,                      # 0-9
+    "numbers": string.digits,                      # alias
+    "mixed":   string.ascii_letters + string.digits,
+    "alnum":   string.ascii_letters + string.digits,
+    "hex":     "0123456789abcdef",
+    "upper":   string.ascii_uppercase,
+    "lower":   string.ascii_lowercase,
+}
+
+
+def parse_sslgen_spec(spec):
+    """Parse the one-line «Генерация ССЛ» spec joined by '&&'.
+
+    Format:  len=<N> && charset=<letters|digits|mixed> && lines=<1..1e12>
+    Order of the three fields does not matter; each may also be given as a
+    bare value (e.g. "8 && letters && 100").  Returns a dict with keys
+    length / charset / alphabet / lines, or raises ValueError.
+    """
+    raw = str(spec or "").replace("—", "-")
+    parts = [p.strip().lower() for p in raw.split("&&") if p.strip()]
+    if len(parts) < 3:
+        raise ValueError(
+            "need 3 fields: len=<N> && charset=<letters|digits|mixed> "
+            "&& lines=<1..1e12>")
+    kv = {}
+    for p in parts:
+        if "=" in p:
+            k, v = p.split("=", 1)
+            kv[k.strip()] = v.strip()
+        else:                                # positional shorthand
+            if p.isdigit():
+                # first bare number -> len, second -> lines
+                if "len" not in kv:
+                    kv["len"] = p
+                else:
+                    kv["lines"] = p
+            elif p in SSL_ALPHABETS:
+                kv["charset"] = p
+            else:
+                raise ValueError(f"unknown charset '{p}'")
+
+    def _pick(*names):
+        for n in names:
+            if n in kv:
+                return kv[n]
+        return None
+
+    lv = _pick("len", "length", "chars", "symbols", "sym")
+    cv = _pick("charset", "set", "alphabet", "cs")
+    nv = _pick("lines", "count", "rows", "n", "strings")
+    if lv is None or cv is None or nv is None:
+        raise ValueError("missing field(s): len / charset / lines")
+    try:
+        length = int(lv)
+        lines = int(nv)
+    except ValueError:
+        raise ValueError("len and lines must be integers") from None
+    if not 1 <= length <= 4096:
+        raise ValueError("len must be 1..4096 chars per line")
+    if not 1 <= lines <= MAX_SSLGEN_LINES:
+        raise ValueError(f"lines must be 1..{MAX_SSLGEN_LINES:,} (1 trillion)")
+    alphabet = SSL_ALPHABETS.get(cv)
+    if alphabet is None:
+        raise ValueError(f"charset must be one of: "
+                         f"{', '.join(sorted(set(SSL_ALPHABETS)))}")
+    kind = ("digits" if alphabet == string.digits else
+            "letters" if alphabet == string.ascii_letters else "mixed")
+    return {"length": length, "lines": lines,
+            "charset": kind, "alphabet": alphabet}
 
 # quantization formats: name -> (block size, bits kept, human label)
 QUANT_FORMATS = {
@@ -88,9 +169,11 @@ class ComputeEngine:
                                                         "vram_mb": 0})
         self._lock = threading.Lock()
         self.events = []                     # recent journal entries
+        self.sslgen_stop = None              # callable -> True to abort a run
         self.stats = {
             "jobs": 0, "bytes_in": 0, "bytes_out": 0,
             "quantized": 0, "compressed": 0, "restored": 0,
+            "sslgen_lines": 0, "sslgen_runs": 0,
             "last_ms": 0.0, "total_ms": 0.0,
         }
 
@@ -310,6 +393,72 @@ class ComputeEngine:
             self.stats["total_ms"] += ms
         return self._note("DEQUANTIZE", src, f"→ {dst} (~lossy restore)",
                           ms, "cpu")
+
+    # -------------------------------------------------- «Генерация ССЛ» mode
+    def sslgen_generate(self, spec, dst=None, preview=5, progress_cb=None):
+        """SSLGEN compute mode: bulk random-string generation.
+
+        `spec` is the one-line '&&'-joined specification, e.g.:
+            len=16 && charset=mixed && lines=1000000
+        charset selects letters / digits / mixed (letters+digits);
+        lines may be up to 1 trillion (1e12) per run.  Generation streams
+        to `dst` (default: <data_dir>/sslgen_<timestamp>.txt) in blocks so
+        even huge runs stay memory-safe; Ctrl-C style aborts are possible
+        through the callable assigned to self.sslgen_stop.
+        Returns a summary dict with a short preview of the first lines.
+        """
+        p = parse_sslgen_spec(spec)
+        length, lines, alphabet = p["length"], p["lines"], p["alphabet"]
+        if not dst:
+            dst = os.path.join(self.data_dir,
+                               f"sslgen_{time.strftime('%Y%m%d_%H%M%S')}.txt")
+        t0 = time.perf_counter()
+        block_n = max(1, min(lines, 8192))          # stream in small blocks
+        written = 0
+        preview_lines = []
+        stop = self.sslgen_stop or (lambda: False)
+        try:
+            with open(dst, "w", encoding="utf-8") as f:
+                while written < lines:
+                    if stop():
+                        break
+                    n = min(block_n, lines - written)
+                    buf = []
+                    for _ in range(n):
+                        buf.append("".join(secrets.choice(alphabet)
+                                           for _ in range(length)))
+                    blob = "\n".join(buf) + "\n"
+                    f.write(blob)
+                    if len(preview_lines) < preview:
+                        take = min(preview - len(preview_lines), n)
+                        preview_lines.extend(buf[:take])
+                    written += n
+                    if progress_cb:
+                        try:
+                            progress_cb(written, lines)
+                        except Exception:            # noqa: BLE001
+                            pass
+                    if lines <= 1_000_000:
+                        block_n = min(lines, block_n * 2)   # ramp-up
+        except OSError as exc:
+            raise RuntimeError(f"sslgen write failed: {exc}") from None
+        ms = (time.perf_counter() - t0) * 1000
+        nbytes = written * (length + 1)
+        with self._lock:
+            self.stats["jobs"] += 1
+            self.stats["sslgen_runs"] += 1
+            self.stats["sslgen_lines"] += written
+            self.stats["bytes_out"] += nbytes
+            self.stats["last_ms"] = ms
+            self.stats["total_ms"] += ms
+        line = self._note("SSLGEN", dst,
+                          f"len={length} charset={p['charset']} "
+                          f"lines={written:,}/{lines:,}", ms,
+                          self._device_for(MODE_SSLGEN))
+        return {"path": dst, "length": length, "charset": p["charset"],
+                "requested": lines, "generated": written,
+                "bytes": nbytes, "ms": ms, "preview": preview_lines,
+                "aborted": written < lines, "journal": line}
 
     # ------------------------------------------------------------- journal
     def recent(self, n=12):

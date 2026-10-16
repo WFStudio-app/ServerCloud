@@ -1262,6 +1262,8 @@ class App:
                   f"(device: {s['device']})")
             print(f"  jobs={s['jobs']} quantized={s['quantized']} "
                   f"compressed={s['compressed']} restored={s['restored']}")
+            print(f"  sslgen      : runs={s.get('sslgen_runs', 0)} · "
+                  f"lines generated={s.get('sslgen_lines', 0):,}")
             inb, outb = s["bytes_in"], s["bytes_out"]
             saved = (1 - outb / inb) * 100 if inb else 0.0
             print(f"  bytes       : {inb} → {outb} ({saved:+.1f}% saved)")
@@ -1357,6 +1359,53 @@ class App:
             print(c("  ✔ " + line, GREEN))
         except (FileNotFoundError, ValueError, OSError) as e:
             print(c(f"  restore failed: {e}", RED))
+
+    def cmd_sslgen(self, rest):
+        """«Генерация ССЛ» compute mode — one-line &&-joined spec.
+
+        Usage: /sslgen len=<N> && charset=<letters|digits|mixed> && lines=<1..1e12>
+        Example: /sslgen len=16 && charset=mixed && lines=1000000
+        """
+        self._screen("ВЫЧИСЛЕНИЯ ▸ ГЕНЕРАЦИЯ ССЛ")
+        spec = rest.strip()
+        if not spec:
+            print(c("── Генерация ССЛ · SSLGEN ──", BOLD))
+            print("  Все параметры задаются в одну строку через '&&':")
+            print("    len=<кол-во символов в строке>")
+            print("    charset=<letters|digits|mixed>  "
+                  "(буквы / только цифры / буквы+цифры)")
+            print("    lines=<кол-во строк>  (от 1 до 1 трлн за раз)")
+            print(DIM + "  пример: /sslgen len=16 && charset=mixed "
+                  "&& lines=1000000" + "\033[0m")
+            try:
+                spec = input(c("  spec> ", CYAN)).strip()
+            except (EOFError, KeyboardInterrupt):
+                return
+            if not spec:
+                print(c("  cancelled.", YELLOW))
+                return
+        try:
+            p = compute_mod.parse_sslgen_spec(spec)
+        except ValueError as e:
+            print(c(f"  bad spec: {e}", RED))
+            return
+        est = p["length"] * p["lines"] + p["lines"]
+        print(c(f"  plan: len={p['length']} charset={p['charset']} "
+                f"lines={p['lines']:,} (~{est:,} bytes)", YELLOW))
+        if p["lines"] > 1_000_000:
+            print(DIM + "  large run — Ctrl-C aborts and keeps what was "
+                  "written so far" + "\033[0m")
+        try:
+            res = self.compute.sslgen_generate(spec)
+        except (ValueError, RuntimeError) as e:
+            print(c(f"  sslgen failed: {e}", RED))
+            return
+        flag = " ⚠ aborted early" if res["aborted"] else ""
+        print(c(f"  ✔ generated {res['generated']:,} line(s) of "
+                f"{res['length']} chars ({res['charset']}) in "
+                f"{res['ms']:.0f} ms → {res['path']}{flag}", GREEN))
+        for ln in res["preview"]:
+            print("    " + ln)
 
     # ---------- «Сеть / NETWORK» section ----------
     def cmd_network(self, rest):
@@ -1690,7 +1739,9 @@ class App:
             print("  [1] status        [2] modes/info")
             print("  [3] quantize file [4] compress file")
             print("  [5] restore file  [6] journal log")
-            print("  [7] set active mode           [0] back")
+            print("  [7] set active mode")
+            print("  [8] «Генерация ССЛ» (SSLGEN)")
+            print("  [0] back")
             try:
                 ch = input(c("  compute# ", CYAN)).strip().lower()
             except (EOFError, KeyboardInterrupt):
@@ -1715,12 +1766,14 @@ class App:
                 self.cmd_compute("log 15")
             elif ch == "7":
                 m = input("  new mode (auto/cpu/gpu/batch/realtime/"
-                          "cluster/energy/turbo/safe): ").strip().lower()
+                          "cluster/energy/turbo/safe/sslgen): ").strip().lower()
                 if compute_mod._norm_mode(m) == m:
                     self.sysconfig.set("compute_mode", m)
                     print(c(f"  compute_mode → {m.upper()}", GREEN))
                 else:
                     print(c("  unknown mode", RED))
+            elif ch == "8":
+                self.cmd_sslgen("")
             else:
                 print(c("  invalid choice", RED))
             input(DIM + "\n  Enter to continue…" + "\033[0m")
@@ -1828,6 +1881,8 @@ class App:
                       "/agent [model] (coding agent) | "
                       "/compute [status|modes|info|log] · /quantize <f> "
                       "[fmt] · /compress <f> · /decompress <f> | "
+                      "/sslgen len=<N> && charset=<letters|digits|mixed> "
+                      "&& lines=<1..1e12> (Генерация ССЛ) | "
                       "/network · /dns · /proxy · /relay · /vault · "
                       "/nettrack [sec] | "
                       "/monitor [watch|once|log|net] · /bios (firmware) | "
@@ -1910,6 +1965,8 @@ class App:
                 self.cmd_compress(arg)
             elif head == "/decompress":
                 self.cmd_decompress(arg)
+            elif head == "/sslgen":
+                self.cmd_sslgen(arg)
             elif head == "/network":
                 self.cmd_network(arg)
             elif head == "/dns":
