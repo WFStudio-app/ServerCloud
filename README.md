@@ -1,11 +1,13 @@
-# ServerCloud ⚡
+<div align="center">
 
-**Local token factory — run 135 local LLMs on any hardware via Ollama. Built for Termux.**
+![ServerCloud banner](docs/assets/servercloud-banner.png)
 
-Generate tokens locally, ask several models **in parallel**, watch live generation stats, pay nothing for API calls.
-Now ships with **TruckOS** — an embedded half-OS layer: bootloader, init (PID-1 style service supervisor), `trk` package manager and a 4-entry system menu.
+**Local token factory — run 135 local LLMs on any hardware via Ollama.**
+Now with **TruckOS** mini-OS and its own **Alpine Linux** base: Docker image, bootable rootfs, OpenRC services and GitHub Actions CI.
 
-[![Version](https://img.shields.io/badge/version/2.00.2--API.Beta.0-blue)]() [![Python](https://img.shields.io/badge/python-3.6+-green)]() [![Platform](https://img.shields.io/badge/platform-Termux%20%7C%20Linux-orange)]() [![Engine](https://img.shields.io/badge/engine-Ollama-purple)]()
+[![Version](https://img.shields.io/badge/version-v2.1.0-blue)]() [![Python](https://img.shields.io/badge/python-3.8+-green)]() [![Alpine](https://img.shields.io/badge/base-Alpine%20Linux%203.20-0ea5e9?logo=alpinelinux&logoColor=white)]() [![Platform](https://img.shields.io/badge/platform-Termux%20%7C%20Linux%20%7C%20Docker-orange)]() [![Engine](https://img.shields.io/badge/engine-Ollama-purple)]() [![CI](https://img.shields.io/badge/tests-83%20passing-brightgreen)](../../actions/workflows/alpine-tests.yml)
+
+</div>
 
 ---
 
@@ -13,9 +15,10 @@ Now ships with **TruckOS** — an embedded half-OS layer: bootloader, init (PID-
 
 | Feature | Description |
 |---|---|
+| 🐧 **Alpine Linux base** | First-class `alpine:3.20` Docker image + bootable rootfs builder (QEMU/LXC/VM), OpenRC service, apk-based install — see [Alpine section](#-alpine-linux-base) |
 | 🚚 **TruckOS menu** | On launch you boot a mini-OS: POST → GRUB-style bootloader menu → init services → system menu: **[1] Terminal · [2] LLM Local · [3] Script Library · [4] Settings** |
 | 📦 **trk package manager** | Truck's own distro-like userland (`~/.servercloud/truck/{usr/bin,var/lib,etc}`): `trk install/remove/search/list/info/bin/repo/doctor`, trust levels, `.trkpkg` JSON manifests, repo indexes |
-| 🔧 **Own init** | `truck-init boot|status|start|stop|restart|shutdown` — runlevels (default / multi-user / rescue), service definitions in `etc/services.json`, log in `var/log/init.log` |
+| 🔧 **Own init** | `truck-init boot|status|start|stop|restart|shutdown` — runlevels (default / multi-user / rescue), service definitions in `etc/services.json`, log in `var/log/init.log`; wrapped as an OpenRC `servercloud` service on Alpine |
 | 🖥️ **Terminal** | Host shell commands, `cd/ls/env`, plus inline `trk`, `init`, `ollama` shortcuts |
 | 🧾 **Script Library** | Reusable server-ops snippets (disk, logs, ollama health, LAN scan…) with tags, search, run counter; add your own with `new` |
 | 🧠 **135 local models** | Small → frontier class (Llama, Qwen, Phi, Gemma, DeepSeek…), 0.4 GB … 594 GB; `/bmc` shows 25 GB+ giants |
@@ -29,12 +32,68 @@ Now ships with **TruckOS** — an embedded half-OS layer: bootloader, init (PID-
 | 🧪 **Demo mode** | If Ollama is offline, everything still runs in simulated mode so you can learn the UX |
 | 🌐 **Network API** | `/apis` — host your local models over HTTP with `SCA-XXXX-XXXX-XXXX` keys, model whitelists, history toggle & rate limits |
 | 📡 **Remote APIs as engine** | `/cpts <SCA-key>` — use *someone else's* ServerCloud API as your generation backend; switch between remotes and back to local anytime |
+| 🏃 **GitHub Actions CI** | Full test suite runs inside `alpine:3.19 / 3.20 / latest` containers on every push, plus Docker image build & smoke tests |
+
+---
+
+## 🐧 Alpine Linux base
+
+The whole stack now ships with its own **Alpine Linux** foundation — three ways to consume it:
+
+![Alpine architecture](docs/assets/alpine-architecture.png)
+
+### 1. Docker image (fastest)
+
+```bash
+docker build -t servercloud:alpine -f docker/Dockerfile.alpine .
+
+docker run --rm -it servercloud:alpine                            # TruckOS boot menu
+docker run --rm -e SC_MODE=test servercloud:alpine               # full unit-test suite
+docker run --rm -e SC_MODE=api -p 8777:8777 servercloud:alpine   # headless network API
+docker run --rm -it -e SC_MODE=shell servercloud:alpine          # plain Alpine shell
+```
+
+Inside the container everything follows standard FHS paths:
+
+| Path | Purpose |
+|---|---|
+| `/opt/servercloud` | app source (`SC_HOME`) |
+| `/var/lib/servercloud` | persistent data + truck userland (`SC_DATA` / `TOKENPFS_HOME`) |
+| `/etc/servercloud/servercloud.conf` | environment configuration |
+| `/etc/init.d/servercloud` | OpenRC runscript wrapping `truck-init` |
+| `/usr/local/bin/servercloud-sys` | host-shell control of TruckOS services |
+
+### 2. Real bootable rootfs (no Docker)
+
+```bash
+./docker/build-alpine-rootfs.sh          # needs sudo + Linux
+```
+
+Downloads the official Alpine minirootfs, installs packages with `apk --root`,
+copies ServerCloud in, enables the OpenRC service and packs
+`alpine-servercloud-<ver>-<arch>.tar.gz` ready for QEMU / LXC / WSL / VM.
+
+### 3. Native install on an existing Alpine box
+
+`scripts/install.sh` already detects `apk`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/WFStudio-app/ServerCloud/main/scripts/install.sh | bash
+servercloud
+```
+
+### CI
+
+`.github/workflows/alpine-tests.yml` runs the whole test suite inside
+`alpine:3.19`, `alpine:3.20` and `alpine:latest` containers on every push,
+then builds the Docker image and smoke-tests both `SC_MODE=test` and
+`SC_MODE=api` boots.
 
 ---
 
 ## ⚡ One-click install (recommended)
 
-Auto-installer for **Linux, Termux, macOS and VPS/cloud servers** (headless over SSH): detects your package manager (apt/dnf/yum/pacman/zypper/apk), installs Python/Git/Ollama, clones the repo and creates a `servercloud` command:
+Auto-installer for **Linux, Termux, macOS, Alpine and VPS/cloud servers** (headless over SSH): detects your package manager (apt/dnf/yum/pacman/zypper/**apk**), installs Python/Git/Ollama, clones the repo and creates a `servercloud` command:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/WFStudio-app/ServerCloud/main/scripts/install.sh | bash
@@ -120,6 +179,10 @@ Both questions were generated **in parallel**.
 | `/hfd <query>` | Browse the Hugging Face **dataset database**: search datasets, list data files (.parquet/.jsonl/.csv), download any into `~/.servercloud/datasets/` |
 | `/hftok [token]` | Set a Hugging Face token for gated/private repos (or export `SERVERCLOUD_HF_TOKEN`) |
 | `/agent [model]` | Launch the **ServerCloud coding agent** — autonomous tool-using assistant on your local models (read/edit files, bash, web, GitHub) |
+| `/autt [model]` | Measure hardware power (CPU/RAM/SSD/temp → POWER SCORE 0–100) and auto-recommend `/stf` |
+| `/dnm <github-url>` | Load custom models from GitHub (raw `.gguf`, blob link or repo README scan) |
+| `/dnmf <path>` | Load your own local `.gguf` / Modelfile |
+| `/delm <name or number>` | Delete a downloaded model (registry + `ollama rm`) |
 | `help` / `quit` | Command list / exit (waits for running jobs up to 60 s) |
 
 ---
@@ -152,6 +215,7 @@ HF model ready: [03] hf/qwen2.5-0.5b-instruct-gguf-qwen2.5-0.5b-instruct-q2_k:la
 ServerCloud can expose selected local models over HTTP so **other devices on your
 LAN/WAN can query them** using per-key authentication, model whitelists,
 optional dialog-history access and a requests-per-minute cap.
+On Alpine this server also runs headless: `docker run -e SC_MODE=api -p 8777:8777 servercloud:alpine`.
 
 ### Create a key
 
@@ -211,6 +275,8 @@ Environment variables:
 |---|---|---|
 | `TOKENPFS_OLLAMA_URL` | `http://127.0.0.1:11434` | Point to a local or remote Ollama server |
 | `TOKENPFS_HOME` | `~/.servercloud` | Where the numbered-model registry is stored |
+| `SC_HOME` / `SC_DATA` | `/opt/servercloud` / `/var/lib/servercloud` | Alpine/Docker layout roots |
+| `SC_MODE` | `interactive` | Container entrypoint mode: `interactive` / `api` / `test` / `shell` |
 | `NO_COLOR` | – | Disable ANSI colors |
 
 ---
@@ -226,7 +292,7 @@ servercloud> /cpts SCA-ABCD-EFGH-JKMN http://192.168.1.40:8777
 Remote API #1 added and ACTIVATED:
    URL      : http://192.168.1.40:8777
    Key      : SCA-ABCD-EFGH-JKMN
-   Server   : ServerCloud 2.0.2-API.Beta.0
+   Server   : ServerCloud 2.1.0
    Models   : qwen2.5:0.5b, llama3.2:1b
 From now on /w questions go through this remote API. Switch back to local models with /cptslocal.
 ```
@@ -290,6 +356,15 @@ text is marked against prompt injection. Full details: `AGENT_README.md`.
 ```
 ServerCloud/
 ├── servercloud_app.py           # entry point (REPL + live dashboard thread)
+├── docker/                      # 🐧 Alpine Linux base
+│   ├── Dockerfile.alpine        # alpine:3.20 + OpenRC + apk image
+│   ├── build-alpine-rootfs.sh   # bootable rootfs builder (QEMU/LXC/WSL)
+│   ├── alpine-rootfs/           # etc/init.d/servercloud, conf.d, wrappers
+│   └── servercloud-api.py       # headless SC_MODE=api launcher
+├── .github/workflows/
+│   └── alpine-tests.yml         # CI: Alpine matrix + Docker build & smoke
+├── docs/assets/                 # README images
+├── scripts/                     # install.sh (apk/apt/dnf/...) · install.ps1
 └── servercloud/
     ├── core/
     │   ├── version.py        # X.X.X versioning algorithm + bump()
@@ -302,12 +377,6 @@ ServerCloud/
     │   ├── cpts_api.py       # /cpts — client for remote ServerCloud APIs
     │   └── huggingface_api.py# /hf /hfd — HF model & dataset database access
     ├── agent/                # /agent — autonomous coding agent (tool calling)
-    │   ├── cli.py            # REPL + standalone entry (python -m servercloud.agent)
-    │   ├── loop.py           # think -> tool -> observe cycle
-    │   ├── tools.py          # files/bash/web/github tools (sandboxed)
-    │   ├── llm.py            # Ollama /api/chat client, JSON-mode fallback
-    │   ├── permissions.py    # confirm-before-write policy
-    │   └── config.py         # ~/.servercloud data dir, GH token storage
     ├── kernel/               # 🚚 TruckOS kernel space (simulated ring 0)
     │   ├── truck_kernel.py   # microkernel: e820 memmap, page allocator,
     │   │                     # slab kmalloc, VM/TLB, CFS-like scheduler,
@@ -324,9 +393,6 @@ ServerCloud/
     │   └── SECURITY.data     # urgency / severity / changelog of ruleset
     ├── os/                   # 🖥️ TruckOS userland shells
     │   ├── truck_shell.py    # Terminal / LLM Local / Script Library / Settings
-    │   │                     #   Settings starts with "Auto-Update":
-    │   │                     #   1. Check OS Updates 2. Kernel Update
-    │   │                     #   3. Security Update (red [!] when urgent)
     │   └── scriptlib.py      # script library backing store
     └── utils/
         └── colors.py         # ANSI colors + startup banner
@@ -354,6 +420,8 @@ ServerCloud/
 
 **Can I use a PC as the engine from my phone?** Yes: run Ollama on the PC, then `export TOKENPFS_OLLAMA_URL=http://PC_IP:11434`.
 
+**Do I need Docker for the Alpine base?** No — Docker is the quickest path, but `build-alpine-rootfs.sh` produces a real bootable rootfs for QEMU/LXC/WSL, and `install.sh` works natively on any existing Alpine box.
+
 ---
 
 ## ⚠️ Hardware notes
@@ -361,16 +429,10 @@ ServerCloud/
 * Small phones (<4 GB RAM): only ≤1.5 B models.
 * 6–8 GB devices: 3–4 B models OK.
 * Generation speed depends on your CPU/NPU; `/stf` caps output rate, it cannot make hardware faster than it is.
+* Alpine container: ≥512 MB RAM for demo mode; real inference needs Ollama reachable via `TOKENPFS_OLLAMA_URL`.
 
 ---
 
 ## 📄 License
 
 MIT — see [LICENSE](LICENSE).
-
-## v1.1.0 additions
-- **90-model catalog** (was 42; see v2.1.1 for the giant class + /bmc) — now includes heavy class (>16 GB SSD): `llama3.1:70b`, `mixtral:8x22b`, `mistral-large`, `qwen2.5:32b`, `deepseek-r1:32b` and more, tagged `[HEAVY >16GB]` with automatic disk-space check before download.
-- **`/autt [model]`** — measures hardware power (CPU cores, load, RAM, SSD, SoC temp → POWER SCORE 0–100) and auto-recommends `/stf` tokens-per-second tuned to your device.
-- **`/dnm <github-url>`** — load custom models from GitHub: direct `.gguf`/Modelfile raw link, blob link (auto-converted), or a plain repo URL (README is scanned for model links). Registered in Ollama when online, numbered `[NN]` right after.
-- **`/dnmf <path>`** — load your own local `.gguf` / Modelfile from the device.
-- **`/delm <name or number>`** — delete a downloaded model (registry + `ollama rm`).
