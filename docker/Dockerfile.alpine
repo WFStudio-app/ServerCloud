@@ -26,7 +26,7 @@ ENV SC_HOME=/opt/servercloud \
 RUN apk add --no-cache \
         python3 py3-pip \
         git curl bash \
-        openrc busybox-initscripts \
+        openrc \
         shadow \
     && adduser -D -h /var/lib/servercloud -s /bin/bash servercloud \
     && mkdir -p /opt/servercloud /var/lib/servercloud /var/log/servercloud \
