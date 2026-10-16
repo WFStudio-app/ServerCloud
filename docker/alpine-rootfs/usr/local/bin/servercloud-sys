@@ -1,0 +1,15 @@
+#!/bin/sh
+# servercloud-sys — control TruckOS services from the Alpine host shell.
+# Usage: servercloud-sys {boot|status|start <svc>|stop <svc>|restart <svc>|shutdown}
+set -e
+
+SC_DATA="${SC_DATA:-/var/lib/servercloud}"
+SC_HOME="${SC_HOME:-/opt/servercloud}"
+TRUCK_INIT="$SC_HOME/kernel/truck_init.py"
+
+if [ ! -f "$TRUCK_INIT" ]; then
+    echo "servercloud-sys: truck_init not found at $TRUCK_INIT" >&2
+    exit 1
+fi
+
+exec python3 "$TRUCK_INIT" "$@"

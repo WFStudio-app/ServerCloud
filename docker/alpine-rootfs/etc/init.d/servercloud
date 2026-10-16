@@ -1,0 +1,22 @@
+#!/sbin/openrc-run
+# TruckOS / ServerCloud service supervisor on Alpine (OpenRC).
+# Wraps the built-in truck-init (PID-1 style supervisor) so the mini-OS
+# services start alongside native Alpine runscripts.
+
+description="ServerCloud TruckOS service supervisor"
+pidfile="/run/servercloud.pid"
+command="/usr/local/bin/servercloud-sys"
+command_args="boot"
+command_background="yes"
+command_user="servercloud:servercloud"
+retry="TERM/10/KILL/5"
+
+depend() {
+    need localmount
+    after bootmisc
+}
+
+start_pre() {
+    checkpath --directory --owner servercloud:servercloud --mode 0775 \
+        /var/lib/servercloud /var/log/servercloud
+}

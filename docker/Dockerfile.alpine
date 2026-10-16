@@ -1,0 +1,55 @@
+# syntax=docker/dockerfile:1
+# ─────────────────────────────────────────────────────────────────────
+# ServerCloud / TruckOS — Alpine Linux base image (OpenRC + apk)
+#
+#   docker build -t servercloud:alpine -f docker/Dockerfile.alpine .
+#   docker run --rm -it servercloud:alpine                 # TruckOS menu
+#   docker run --rm -e SC_MODE=test servercloud:alpine     # unit tests
+#   docker run --rm -e SC_MODE=api -p 8080:8080 servercloud:alpine
+# ─────────────────────────────────────────────────────────────────────
+FROM alpine:3.20
+
+ARG SC_VERSION=2.1.0
+LABEL org.opencontainers.image.title="ServerCloud TruckOS" \
+      org.opencontainers.image.description="Local token factory + TruckOS mini-OS on Alpine Linux" \
+      org.opencontainers.image.version="${SC_VERSION}" \
+      org.opencontainers.image.source="https://github.com/WFStudio-app/ServerCloud"
+
+ENV SC_HOME=/opt/servercloud \
+    SC_DATA=/var/lib/servercloud \
+    TOKENPFS_HOME=/var/lib/servercloud \
+    TRUCK_ROOT=/var/lib/servercloud/truck \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+# --- Base system packages via apk (Alpine package manager) -----------
+RUN apk add --no-cache \
+        python3 py3-pip \
+        git curl bash \
+        openrc busybox-initscripts \
+        shadow \
+    && adduser -D -h /var/lib/servercloud -s /bin/bash servercloud \
+    && mkdir -p /opt/servercloud /var/lib/servercloud /var/log/servercloud \
+    && chown -R servercloud:servercloud /var/lib/servercloud /var/log/servercloud
+
+# --- Application source ----------------------------------------------
+COPY --chown=servercloud:servercloud . /opt/servercloud
+
+# --- Alpine integration files (conf.d, OpenRC runscript, wrappers) ----
+COPY docker/alpine-rootfs/ /
+RUN chmod 755 /usr/local/bin/servercloud-entrypoint \
+             /usr/local/bin/servercloud-sys \
+             /etc/init.d/servercloud \
+    && ln -s /usr/local/bin/servercloud-entrypoint /usr/local/bin/servercloud \
+    && rc-update add servercloud default || true
+
+# --- Python test/runtime deps ------------------------------------------
+RUN pip install --no-cache-dir --break-system-packages pytest || \
+    pip install --no-cache-dir pytest
+
+EXPOSE 8777 11434
+VOLUME ["/var/lib/servercloud"]
+
+# Default: boot the TruckOS mini-OS (POST -> bootloader -> init -> menu).
+ENTRYPOINT ["/usr/local/bin/servercloud-entrypoint"]
+CMD []

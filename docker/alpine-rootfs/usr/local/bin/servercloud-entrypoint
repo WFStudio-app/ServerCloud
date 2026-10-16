@@ -1,0 +1,37 @@
+#!/bin/sh
+# servercloud-entrypoint — Alpine container entrypoint for ServerCloud / TruckOS.
+# Honors SC_MODE env:
+#   interactive (default) -> boot into the TruckOS menu (POST -> init -> menu)
+#   api                   -> start the network API server headless
+#   test                  -> run the full unit-test suite and exit
+#   shell                 -> drop into a plain Alpine shell
+set -e
+
+SC_HOME="${SC_HOME:-/opt/servercloud}"
+SC_DATA="${SC_DATA:-/var/lib/servercloud}"
+SC_MODE="${SC_MODE:-interactive}"
+
+mkdir -p "$SC_DATA" "$SC_DATA/logs"
+
+case "$SC_MODE" in
+    test)
+        cd "$SC_HOME"
+        exec python3 -m pytest tests/ -q
+        ;;
+    api)
+        cd "$SC_HOME"
+        export SERVERCLOUD_API_HOST=0.0.0.0
+        export SERVERCLOUD_API_PORT="${SC_API_PORT:-8777}"
+        exec python3 "$SC_HOME/docker/servercloud-api.py"
+        ;;
+    shell|bash)
+        exec /bin/sh
+        ;;
+    interactive|"")
+        cd "$SC_HOME"
+        exec python3 servercloud_app.py
+        ;;
+    *)
+        exec "$@"
+        ;;
+esac
