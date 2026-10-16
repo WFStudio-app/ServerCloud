@@ -154,6 +154,25 @@ def _disk_free_gb(path=None):
         return 0.0
 
 
+# ---- public helpers (used by servercloud_app / cluster / monitor) ----
+
+def total_ram_mb():
+    """Total physical RAM in megabytes (cross-platform)."""
+    total, _avail = _mem_info()
+    return int(total) if total else 0
+
+
+def available_ram_mb():
+    """Available RAM in megabytes (cross-platform)."""
+    _total, avail = _mem_info()
+    return int(avail) if avail else 0
+
+
+def free_disk_gb(path=None):
+    """Free disk space in gigabytes at *path* (default: home dir)."""
+    return round(_disk_free_gb(path), 2)
+
+
 def _thermal_linux():
     """Best-effort SoC temperature via thermal zones (Termux/RPi/x86 Linux)."""
     base = "/sys/class/thermal"
