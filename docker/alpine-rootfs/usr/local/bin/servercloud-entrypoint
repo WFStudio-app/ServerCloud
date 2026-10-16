@@ -16,6 +16,8 @@ mkdir -p "$SC_DATA" "$SC_DATA/logs"
 case "$SC_MODE" in
     test)
         cd "$SC_HOME"
+        # Guard against broken third-party pytest plugins in the image.
+        export PYTEST_DISABLE_PLUGIN_AUTOLOAD=1
         exec python3 -m pytest tests/ -q
         ;;
     api)

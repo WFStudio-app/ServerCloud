@@ -89,7 +89,7 @@ class KernelCheck(unittest.TestCase):
         with mock.patch.object(tu, "_raw_file",
                                lambda o, b, br, p: local_ver
                                if ("VERSION.data" in p or "kernel_version" in p)
-                               else f"version = {local_ver}\n"):
+                               else "version = %s\n" % local_ver):
             r = tu.check_kernel_update(CFG)
         self.assertTrue(r["ok"])
         self.assertFalse(r["available"])

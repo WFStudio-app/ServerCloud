@@ -261,8 +261,8 @@ class App:
         print(f"   Endpoint   : {self._api_url_hint()}")
         if self.api:
             print(c("Server is LIVE now. Client example:", BOLD))
-            print(f"   curl -X POST {self._api_url_hint()}/v1/chat \\")
-            print(f"     -H 'Authorization: Bearer {key.key}' \\")
+            print("   curl -X POST %s/v1/chat \\" % self._api_url_hint())
+            print("     -H 'Authorization: Bearer %s' \\" % key.key)
             print(f"     -d '{{\"model\":\"{models[0]}\",\"messages\":[{{\"role\":\"user\",\"content\":\"Привет\"}}]}}'")
         else:
             print(c("WARNING: API server is not running (port busy?) — "
@@ -880,7 +880,7 @@ class App:
             print(c(f"File not found: {path}", RED))
             return
         base = os.path.basename(path)
-        name = f"custom/{re.sub(r'\\.gguf$', '', base, flags=re.I).lower()}:latest"
+        name = "custom/%s:latest" % re.sub(r'\.gguf$', '', base, flags=re.I).lower()
         if not self.confirm_download(name):
             print(c("Cancelled.", YELLOW))
             return

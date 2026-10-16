@@ -26,6 +26,9 @@ jobs:
         env:
           SC_DATA: /tmp/servercloud-data
           TOKENPFS_HOME: /tmp/servercloud-data
+          # PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 protects the run from broken
+          # third-party pytest plugins (e.g. libtmux) incompatible with newer pytest.
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
         run: python3 -m pytest tests/ -q
 
   alpine-docker-image:
