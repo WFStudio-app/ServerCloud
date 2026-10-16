@@ -1,0 +1,51 @@
+ServerCloud / TruckOS v2.1.0 — module manifest (tf.modules)
+================================================================
+
+CORE (non-removable, shipped with the OS base image)
+----------------------------------------------------------------
+kernel/truck_boot.py          5-stage boot: POST -> BIOS menu -> GRUB -> kernel -> init
+kernel/truck_kernel.py        TruckOS kernel: scheduler, TTYs, syscalls, BIOS handoff
+truck_modules/sysconfig.py    persistent configuration store (boot/compute/network keys)
+servercloud_app.py            main application shell / REPL / menus (thin delegator)
+
+MODULES (each optional feature is a separate importable module)
+----------------------------------------------------------------
+servercloud/modules/api_server.py     local HTTP API (Ollama-compatible endpoints)
+servercloud/modules/ollama_api.py     Ollama backend client (live/demo fallback)
+servercloud/modules/jobs -> core/jobs.py   job manager + token_hook for live stream
+servercloud/modules/cluster.py        multi-device clustering: lan/wifi/mesh/relay/cpts/internet/manual
+servercloud/modules/compute.py        "Вычисления": quantize (q8_0..iq1), compress/decompress,
+                                      9 compute modes (AUTO/CPU/GPU/BATCH/REALTIME/CLUSTER/
+                                      ENERGY/TURBO/SAFE), live op journal + stats
+servercloud/modules/netkit.py         "Сеть": DNS zones, proxy rules w/ pubkey ACL,
+                                      relay servers, file vault on remote nodes,
+                                      "Отсл. сетевых вычислений" live tracker
+servercloud/modules/keycipher.py      Ed25519/HMAC key identities + TRK-35 cipher masking
+                                      (every AI/API key rendered as exactly 35 chars)
+servercloud/modules/monitor.py        LiveMonitor: dual-pane terminal (TTY1+TTY2),
+                                      real-time token flow + compute ledger
+servercloud/modules/api_keys.py       CLI: /apis /apim (encrypted key store, TRK-35 view)
+servercloud/modules/cpts_cli.py       CLI: /cpts /cptsm cross-node protocol commands
+servercloud/modules/models_cli.py     CLI: /models /bmc /dl model management
+servercloud/modules/hf_cli.py         CLI: /hf /hfd Hugging Face integration
+servercloud/modules/chat_cli.py       CLI: /w /sys /status chat & system info
+servercloud/modules/agent_cli.py      CLI: /agent coding agent
+
+BIOS (runtime hardware reconfiguration)
+----------------------------------------------------------------
+Kernel.enter_bios()           exit OS -> firmware setup; GPU/RAM/SSD sliders applied
+                              immediately and persisted to sysconfig
+
+MENUS
+----------------------------------------------------------------
+[5] Вычисления                quantization, compression, compute modes, live log
+[6] Сеть                      DNS, proxy, relays, vault, cluster links, net tracking
+[7] Монитор                   two-terminal live view (tokens + computations)
+[8] BIOS                      firmware setup from inside the OS
+
+TESTS
+----------------------------------------------------------------
+tests/test_sections_compute_network.py   8 tests: quantize roundtrip, lossless compress,
+                                         modes/journal, DNS/proxy/vault, TRK-35 == 35 chars,
+                                         dual-pane monitor, token hook, resilient generation
+Full suite: 91 passed

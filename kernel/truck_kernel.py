@@ -22,12 +22,13 @@ software interrupts.
 """
 
 import random
+import os
 import time
 
 # ------------------------------------------------------------------ constants
 KERNEL_NAME = "TruckOS Kernel"
 KERNEL_VERSION = "2.1.0-truck"
-KERNEL_BUILDOPT = "SMP PREEMPT LOCALSIM PORTABLE VFS"
+KERNEL_BUILDOPT = "SMP PREEMPT LOCALSIM PORTABLE VFS BIOS-EXIT CLUSTER"
 
 PAGE_SHIFT = 12                 # 4 KiB pages, like x86_64 Linux
 PAGE_SIZE = 1 << PAGE_SHIFT     # 4096
@@ -865,6 +866,77 @@ class Kernel:
         raise KernelPanic(message)
 
     halt = None  # set below
+
+    # ------------------------------------------------------------- BIOS exit
+    def enter_bios(self, cfg=None):
+        """Exit the OS into the firmware setup screen (UEFI-style).
+
+        The kernel is *suspended* (state 'bios'), control goes to
+        truck_boot.bios_setup(), and on return the kernel resumes.  This is
+        the runtime equivalent of hitting DEL/F2 on real hardware: services
+        keep their definitions, but ring 0 hands the console to firmware.
+        Returns whatever bios_setup returns (None or a runlevel string).
+        """
+        from . import truck_boot          # local import: no boot-time cycle
+        if cfg is None:
+            root = trk_init_root()
+            from truck_modules.sysconfig import SysConfig
+            cfg = SysConfig(os.path.join(root, "etc", "sysconfig.json"))
+        prev = self.state
+        if prev == "running":
+            self.state = "bios"
+            self._klog("INFO", "handing console to TRUCK-FIRMWARE SETUP "
+                               "(kernel suspended)")
+        try:
+            return truck_boot.bios_setup(cfg)
+        finally:
+            if self.state == "bios":
+                self.state = prev
+                self._klog("INFO", "firmware setup exited — kernel resumed")
+
+    # --------------------------------------------- live virtual-hardware view
+    def hw_profile(self, cfg):
+        """Effective virtual-GPU / RAM / SSD profile (BIOS keys win over
+        autodetected host values; `cfg` may be a SysConfig or a plain dict)."""
+        def _g(key, default=None):
+            try:
+                return cfg.get(key, default)
+            except AttributeError:
+                return cfg.get(key, default)
+        ram_mb = _bounded(_g("kernel_ram_mb", 64), 8, 4096, 64, "ram")
+        gpu_on = int(bool(_g("bios_gpu_enabled", 1)))
+        vram = _bounded(_g("bios_gpu_vram_mb", 512), 64, 24576, 512, "vram")
+        ssd_on = int(bool(_g("bios_ssd_enabled", 1)))
+        ssd_gb = _bounded(_g("bios_ssd_gb", 128), 1, 8192, 128, "ssd")
+        return {
+            "ram_mb": ram_mb,
+            "ncpu": _bounded(_g("kernel_ncpu", 2), 1, 64, 2, "ncpu"),
+            "gpu_enabled": bool(gpu_on),
+            "gpu_vram_mb": vram if gpu_on else 0,
+            "ssd_enabled": bool(ssd_on),
+            "ssd_gb": ssd_gb if ssd_on else 0,
+        }
+
+
+def _bounded(val, lo, hi, fallback, name):
+    """Range-guard helper shared with truck_boot (kept in sync there)."""
+    try:
+        v = int(val)
+    except (TypeError, ValueError):
+        return fallback
+    if not lo <= v <= hi:
+        return fallback
+    return v
+
+
+def _trk_root():
+    return os.environ.get("SERVERCLOUD_DATA",
+                          os.path.expanduser("~/.servercloud"))
+
+
+def trk_init_root():
+    import truck_modules.trk as _trk
+    return _trk.init_truck(_trk_root())
 
 
 def _halt(self, reason="Power down"):

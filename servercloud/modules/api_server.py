@@ -138,7 +138,7 @@ class ApiServer:
 
     def __init__(self, host, port, resolver, generator, history_provider,
                  keystore, app_name="ServerCloud", version="?",
-                 record_hook=None):
+                 record_hook=None, audit_hook=None):
         self.host = host
         self.port = port
         self.resolve_model = resolver        # fn(num_or_name) -> ollama model name | None
@@ -149,6 +149,10 @@ class ApiServer:
         self.version = version
         if record_hook is not None:          # fn(model_ref, user_msg, reply) -> persist dialog
             self.record_exchange = record_hook
+        # fn(key_number, masked_fingerprint, method, path, code) — called for
+        # every authenticated request; the live monitor tails these lines.
+        # Keys reach this hook ONLY as TRK-35 fingerprints (see keycipher).
+        self.audit_hook = audit_hook
         self._httpd = None
         self._thread = None
         # live HTTP/1.1 connections (keep-alive clients) tracked so that
@@ -243,6 +247,18 @@ def _make_handler(app_ctx: ApiServer):
                 return None
 
         # ---- routes ----
+        def _audit(self, key, code):
+            """Fire the audit hook with the TRK-35 fingerprint — never raw."""
+            if app_ctx.audit_hook is None:
+                return
+            try:
+                from .keycipher import mask_key
+                fp = mask_key(key.key)          # 35-char encrypted fingerprint
+                app_ctx.audit_hook(key.number, fp, self.command,
+                                   self.path.split("?", 1)[0], code)
+            except Exception:                   # auditing must never break API
+                pass
+
         def do_GET(self):
             if self.path.startswith("/api/health"):
                 return self._json(200, {"ok": True,
@@ -251,6 +267,7 @@ def _make_handler(app_ctx: ApiServer):
             key, err, code = app_ctx.auth(self.headers, count_rate=False)
             if not key:
                 return self._json(code, {"error": err})
+            self._audit(key, 200)
             if self.path.startswith("/v1/models"):
                 out = []
                 for num in key.models:
@@ -277,6 +294,7 @@ def _make_handler(app_ctx: ApiServer):
             key, err, code = app_ctx.auth(self.headers)
             if not key:
                 return self._json(code, {"error": err})
+            self._audit(key, 200)
             body = self._read_body()
             if body is None:
                 return self._json(400, {"error": "invalid JSON body"})

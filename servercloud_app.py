@@ -34,6 +34,11 @@ from servercloud.core import hardware                                   # noqa: 
 from servercloud.modules import ollama_api                               # noqa: E402
 from servercloud.modules import custom_models                           # noqa: E402
 from servercloud.modules import huggingface_api                         # noqa: E402
+from servercloud.modules import cluster as cluster_mod                   # noqa: E402
+from servercloud.modules import compute as compute_mod                   # noqa: E402
+from servercloud.modules import netkit as netkit_mod                     # noqa: E402
+from servercloud.modules.monitor import LiveMonitor                      # noqa: E402
+from servercloud.modules.keycipher import mask_key                       # noqa: E402
 from servercloud.modules.api_server import (ApiKey, KeyStore, ApiServer,
                                          generate_key)                 # noqa: E402
 from servercloud.modules.cpts_api import (CptsStore, CptsClient,
@@ -93,6 +98,53 @@ class App:
         except OSError as e:
             print(c(f"API server could not bind {api_host}:{api_port} — {e}", YELLOW))
             self.api = None
+        # ---- cluster: fuse several devices into one TruckOS server ----
+        self.cluster = None
+        try:
+            import multiprocessing
+            ncpu = multiprocessing.cpu_count()
+        except (ImportError, NotImplementedError):
+            ncpu = 1
+        self.cluster = cluster_mod.ClusterManager(
+            hostname=self.sysconfig.get("hostname", "truck-os"),
+            port=int(self.sysconfig.get("cluster_port",
+                                        cluster_mod.DEFAULT_PORT)),
+            name=self.sysconfig.get("cluster_name", "truck-cloud"),
+            cpu=ncpu,
+            ram_mb=int(hardware.total_ram_mb()),
+            disk_gb=hardware.free_disk_gb(),
+            ollama=self.ok,
+            models=[e["name"] for e in self.reg.all().values()],
+            api_port=(self.api.port if self.api else 0),
+            group=self.sysconfig.get("cluster_group", ""),
+            data_dir=DATA_DIR)
+        if self.sysconfig.get("cluster_enabled"):
+            if self.cluster.start():
+                print(c(f"cluster: control plane up on :"
+                        f"{self.cluster.port} (node "
+                        f"{self.cluster.me.node_id})", CYAN))
+        # ---- «Вычисления»: quantize / compress + compute modes ----
+        self.compute = compute_mod.ComputeEngine(
+            data_dir=DATA_DIR, cfg=self.sysconfig,
+            gpu_provider=lambda: self.kernel.hw_profile(self.sysconfig))
+        # ---- «Сеть»: DNS / proxy / relays / vault (public-key first) ----
+        self.netkit = netkit_mod.NetworkKit(DATA_DIR, cfg=self.sysconfig)
+        # ---- live dual-pane monitor (token stream + TRK-35 key audit) ----
+        self.monitor = LiveMonitor(
+            DATA_DIR, cfg=self.sysconfig,
+            kernel_provider=lambda: self.kernel,
+            jobs_provider=lambda: list(self.mgr.jobs),
+            cluster_provider=lambda: self.cluster if self.cluster.running
+            else None)
+        # feed the token pipeline into TTY1 of the monitor
+        try:
+            self.mgr.token_hook = self.monitor.note_token
+        except AttributeError:
+            pass
+
+    # ---------- virtual-hardware helpers (BIOS-tunable GPU/RAM/SSD) ----------
+    def _vhw(self):
+        return self.kernel.hw_profile(self.sysconfig)
 
     # ---------- network API helpers ----------
     def _api_resolve(self, ref):
@@ -1172,6 +1224,355 @@ class App:
             dash.join(timeout=2)
         print()
 
+    # ---------- «Вычисления / COMPUTE» section ----------
+    def cmd_compute(self, rest):
+        """Compute subsystem: modes, stats and live journal."""
+        parts = rest.split()
+        sub = parts[0].lower() if parts else "status"
+        eng = self.compute
+        if sub in ("status", ""):
+            s = eng.snapshot()
+            vhw = self._vhw()
+            print(c("── Вычисления · COMPUTE ──", BOLD))
+            print(f"  active mode : {s['mode'].upper()} "
+                  f"(device: {s['device']})")
+            print(f"  jobs={s['jobs']} quantized={s['quantized']} "
+                  f"compressed={s['compressed']} restored={s['restored']}")
+            inb, outb = s["bytes_in"], s["bytes_out"]
+            saved = (1 - outb / inb) * 100 if inb else 0.0
+            print(f"  bytes       : {inb} → {outb} ({saved:+.1f}% saved)")
+            print(f"  timing      : last {s['last_ms']:.1f} ms · "
+                  f"total {s['total_ms']:.1f} ms")
+            print(f"  virtual hw  : RAM {vhw['ram_mb']}MiB · "
+                  f"{'iGPU ' + str(vhw['gpu_vram_mb']) + 'MiB' if vhw['gpu_enabled'] else 'no GPU'} · "
+                  f"{'SSD ' + str(vhw['ssd_gb']) + 'GiB' if vhw['ssd_enabled'] else 'no SSD'}")
+            print(c("  modes:", BOLD),
+                  ", ".join(("*" if m == s["mode"] else "") + m.upper()
+                            for m in s["modes_available"]))
+            print(DIM + "  info: /compute info <MODE> · set via "
+                  "/opt compute_mode <mode>" + "\033[0m")
+        elif sub == "modes":
+            for m in eng.modes():
+                label, desc = compute_mod.MODE_INFO.get(m, (m.upper(), ""))
+                print(f"  {label:<9} {desc}")
+        elif sub == "info":
+            name = compute_mod._norm_mode(parts[1] if len(parts) > 1 else "")
+            label, desc = compute_mod.MODE_INFO.get(name, (name.upper(), ""))
+            print(f"  {label}: {desc} · device={eng._device_for(name)}")
+        elif sub == "log":
+            n = int(parts[1]) if len(parts) > 1 else 12
+            for line in eng.recent(n):
+                print("  " + line)
+            if not eng.recent(1):
+                print(c("  journal empty — run /quantize or /compress first.",
+                        YELLOW))
+        else:
+            print(c("Usage: /compute [status|modes|info <MODE>|log [n]]",
+                    YELLOW))
+
+    def _path_or_input(self, arg):
+        if arg:
+            return arg
+        try:
+            return input(c("  file path: ", GREEN)).strip()
+        except (EOFError, KeyboardInterrupt):
+            return ""
+
+    def cmd_quantize(self, rest):
+        """Quantize a file's payload (q8_0/q4_0/q4_k/q3_k/q2_k/iq1)."""
+        parts = rest.split()
+        path = parts[0] if parts else self._path_or_input("")
+        fmt = parts[1] if len(parts) > 1 else \
+            self.sysconfig.get("quant_format", "q4_0")
+        mode = parts[2] if len(parts) > 2 else None
+        if not path:
+            print(c("Usage: /quantize <file> [fmt] [mode]", YELLOW))
+            return
+        if fmt not in compute_mod.QUANT_FORMATS:
+            print(c(f"Unknown format '{fmt}'. Available: "
+                    + ", ".join(compute_mod.QUANT_FORMATS), RED))
+            return
+        try:
+            line = self.compute.quantize_file(path, fmt=fmt, mode=mode)
+            print(c("  ✔ " + line, GREEN))
+        except FileNotFoundError:
+            print(c(f"  file not found: {path}", RED))
+        except OSError as e:
+            print(c(f"  quantize failed: {e}", RED))
+
+    def cmd_compress(self, rest):
+        """Lossless TRKZ compression (RLE + zlib)."""
+        parts = rest.split()
+        path = parts[0] if parts else self._path_or_input("")
+        mode = parts[1] if len(parts) > 1 else None
+        if not path:
+            print(c("Usage: /compress <file> [mode]", YELLOW))
+            return
+        try:
+            line = self.compute.compress_file(path, mode=mode)
+            print(c("  ✔ " + line, GREEN))
+        except FileNotFoundError:
+            print(c(f"  file not found: {path}", RED))
+        except OSError as e:
+            print(c(f"  compress failed: {e}", RED))
+
+    def cmd_decompress(self, rest):
+        """Restore a .trkz / .qX container back to a plain file."""
+        path = rest.split(maxsplit=1)[0] if rest else self._path_or_input("")
+        if not path:
+            print(c("Usage: /decompress <file.trkz|file.q4_0>", YELLOW))
+            return
+        try:
+            if path.endswith(".trkz"):
+                line = self.compute.decompress_file(path)
+            else:
+                line = self.compute.dequantize_file(path)
+            print(c("  ✔ " + line, GREEN))
+        except (FileNotFoundError, ValueError, OSError) as e:
+            print(c(f"  restore failed: {e}", RED))
+
+    # ---------- «Сеть / NETWORK» section ----------
+    def cmd_network(self, rest):
+        """Network overview: identity, services, counters."""
+        nk = self.netkit
+        s = nk.snapshot()
+        print(c("── Сеть · NETWORK (public-key first) ──", BOLD))
+        print(f"  node key      : {c(s['identity'], MAGENTA)}")
+        print(f"  DNS records   : {s['dns']}   proxy rules: {s['proxy']}")
+        print(f"  relays        : {s['relays_online']}/{s['relays']} online")
+        print(f"  vault files   : {s['vault']} "
+              f"({s['counters']['bytes_vault']} bytes stored)")
+        cl = self.cluster
+        if cl.running:
+            p = cl.pool()
+            print(f"  cluster pool  : {p['nodes']} node(s) · cpu={p['cpu']} "
+                  f"· ram={p['ram_mb']}MB · disk={p['disk_gb']}GB")
+        else:
+            print(DIM + "  cluster pool  : offline (/cluster start)"
+                  + "\033[0m")
+        print(c("  recent events:", BOLD))
+        for line in nk.recent(6):
+            print("  " + line)
+        print(DIM + "  /dns · /proxy · /relay · /vault · /nettrack · "
+              "/monitor net" + "\033[0m")
+
+    def cmd_dns(self, rest):
+        """Local signed DNS zone: add/del/lookup/list."""
+        parts = rest.split()
+        sub = parts[0].lower() if parts else "list"
+        nk = self.netkit
+        if sub == "add" and len(parts) >= 3:
+            rtype = parts[3].upper() if len(parts) > 3 else "A"
+            ttl = parts[4] if len(parts) > 4 else 300
+            try:
+                print(c("  ✔ " + nk.dns_add(parts[1], parts[2], rtype, ttl),
+                        GREEN))
+            except (ValueError, TypeError) as e:
+                print(c(f"  {e}", RED))
+        elif sub == "del" and len(parts) >= 2:
+            print(c("  ✔ " + nk.dns_del(parts[1]), YELLOW))
+        elif sub == "lookup" and len(parts) >= 2:
+            rec = nk.dns_lookup(parts[1])
+            if rec:
+                print(f"  {rec['name']} → {rec['value']} "
+                      f"[{rec['type']}] ttl={rec['ttl']} "
+                      f"by {rec['by'][:9]}…")
+            else:
+                print(c("  no record (NXDOMAIN)", RED))
+        elif sub in ("list", ""):
+            if not nk.dns_zone:
+                print(c("  zone empty — /dns add <name> <ip|target> [A|CNAME]",
+                        YELLOW))
+            for r in nk.dns_zone:
+                print(f"  {r['name']:<28} {r['type']:<6} {r['value']:<24} "
+                      f"ttl={r['ttl']}")
+        else:
+            print(c("Usage: /dns [add <name> <val> [A|CNAME] [ttl] | del "
+                    "<name> | lookup <name> | list]", YELLOW))
+
+    def cmd_proxy(self, rest):
+        """Proxy rules: listen_port → upstream, with public-key ACL."""
+        parts = rest.split()
+        sub = parts[0].lower() if parts else "list"
+        nk = self.netkit
+        if sub == "add" and len(parts) >= 3:
+            try:
+                listen = int(parts[1])
+                hostport = parts[2].rsplit(":", 1)
+                host = hostport[0]
+                port = int(hostport[1]) if len(hostport) > 1 else 80
+                acl = parts[3] if len(parts) > 3 else ""
+                print(c("  ✔ " + nk.proxy_add(listen, host, port, acl),
+                        GREEN))
+            except (ValueError, IndexError) as e:
+                print(c(f"  bad rule: {e}", RED))
+        elif sub == "del" and len(parts) >= 2:
+            try:
+                print(c("  ✔ " + nk.proxy_del(parts[1]), YELLOW))
+            except ValueError:
+                print(c("  port must be a number", RED))
+        elif sub in ("list", ""):
+            if not nk.proxy_rules:
+                print(c("  no rules — /proxy add <listen> <host:port> "
+                        "[keyfp1,keyfp2]", YELLOW))
+            for r in nk.proxy_rules:
+                acl = ",".join(a[:9] + "…" for a in r["acl"]) or "open"
+                print(f"  :{r['listen']:<6} → {r['host']}:{r['port']} "
+                      f"ACL[{acl}] since {r['since']}")
+        else:
+            print(c("Usage: /proxy [add <port> <host:port> [acls] | del "
+                    "<port> | list]", YELLOW))
+
+    def cmd_relay(self, rest):
+        """Route traffic through remote ServerCloud relay servers."""
+        parts = rest.split()
+        sub = parts[0].lower() if parts else "list"
+        nk = self.netkit
+        if sub == "add" and len(parts) >= 2:
+            hp = parts[1].rsplit(":", 1)
+            host = hp[0]
+            port = int(hp[1]) if len(hp) > 1 and hp[1].isdigit() else 8790
+            pubkey = parts[2] if len(parts) > 2 else ""
+            print(c("  ✔ " + nk.relay_add(host, port, pubkey), GREEN))
+        elif sub == "del" and len(parts) >= 2:
+            hp = parts[1].rsplit(":", 1)
+            port = int(hp[1]) if len(hp) > 1 and hp[1].isdigit() else None
+            print(c("  ✔ " + nk.relay_del(hp[0], port), YELLOW))
+        elif sub == "join" and len(parts) >= 2:
+            # fuse the relay node into the cluster pool as well
+            ok = self.cluster.join(parts[1])
+            print(c("  cluster joined via relay." if ok else
+                    "  relay is not a ServerCloud control plane.",
+                    GREEN if ok else RED))
+        elif sub in ("list", ""):
+            if not nk.relays:
+                print(c("  no relays — /relay add <host[:port]> [pubkey]",
+                        YELLOW))
+            for r in nk.relays:
+                col = GREEN if r["status"] == "online" else RED
+                print(f"  {r['host']}:{r['port']:<6} key {r['fingerprint'][:9]}… "
+                      f"[{c(r['status'], col)}] since {r['since']}")
+        else:
+            print(c("Usage: /relay [add <host[:port]> [pubkey] | del "
+                    "<host[:port]> | join <host[:port]> | list]", YELLOW))
+
+    def cmd_vault(self, rest):
+        """Store/verify files on servers; every object bound to a key."""
+        parts = rest.split()
+        sub = parts[0].lower() if parts else "list"
+        nk = self.netkit
+        if sub == "put" and len(parts) >= 2:
+            server = parts[2] if len(parts) > 2 else \
+                self.sysconfig.get("vault_server", "local")
+            try:
+                print(c("  ✔ " + nk.vault_store(parts[1], server), GREEN))
+            except FileNotFoundError:
+                print(c(f"  file not found: {parts[1]}", RED))
+            except OSError as e:
+                print(c(f"  vault put failed: {e}", RED))
+        elif sub == "verify" and len(parts) >= 2:
+            res = nk.vault_verify(parts[1])
+            if res is None:
+                print(c("  not registered in vault.", YELLOW))
+            else:
+                print(c("  integrity OK" if res else "  MISMATCH!",
+                        GREEN if res else RED))
+        elif sub in ("list", ""):
+            files = nk.vault_list()
+            if not files:
+                print(c("  vault empty — /vault put <file> [server]", YELLOW))
+            for v in files:
+                print(f"  {v['name']:<28} {v['size']:>10}B "
+                      f"chunks={v['chunks']:<4} srv={v['server']:<8} "
+                      f"sha={v['sha256'][:12]} owner={v['owner'][:9]}…")
+        else:
+            print(c("Usage: /vault [put <file> [server] | verify <file> | "
+                    "list]", YELLOW))
+
+    def cmd_nettrack(self, rest):
+        """«Отслеживание сетевых вычислений» — live network-compute tracker."""
+        import threading as _th
+        parts = rest.split()
+        seconds = float(parts[0]) if parts else 0.0
+        stop = _th.Event()
+        if seconds <= 0:
+            print(c("Tracking network computations — Ctrl-C stops.", CYAN))
+        try:
+            while True:
+                if seconds > 0:
+                    time.sleep(min(seconds, 1.0))
+                    seconds -= 1.0
+                    if seconds <= 0:
+                        break
+                else:
+                    time.sleep(float(self.sysconfig.get(
+                        "mon_refresh_sec", 1.0)))
+                os.system("cls" if os.name == "nt" else "clear")
+                nk = self.netkit
+                s = nk.snapshot()
+                print(c("╔═ ОТСЛЕЖИВАНИЕ СЕТЕВЫХ ВЫЧИСЛЕНИЙ ═══════════╗",
+                        MAGENTA))
+                print(f"  node key: {s['identity']}")
+                print(f"  dns={s['dns']} proxy={s['proxy_rules']} "
+                      f"relays={s['relays_online']}/{s['relays_total']} "
+                      f"vault={s['vault']}")
+                cnt = s["counters"]
+                print("  counters: " + " ".join(
+                    f"{k}={v}" for k, v in cnt.items()))
+                cl = self.cluster
+                if cl.running:
+                    p = cl.pool()
+                    print(f"  cluster : nodes={p['nodes']} cpu={p['cpu']} "
+                          f"ram={p['ram_mb']}MB")
+                print(c("  ── journal ──", BOLD))
+                for line in nk.recent(10):
+                    print("  " + line)
+                comp = self.compute.recent(3)
+                if comp:
+                    print(c("  ── compute feed ──", BOLD))
+                    for line in comp:
+                        print("  " + line)
+                print(c("╚══════════════════════════════════════════════╝",
+                        MAGENTA))
+        except KeyboardInterrupt:
+            pass
+        finally:
+            stop.set()
+        print(c("nettrack: stopped.", YELLOW))
+
+    # ---------- live monitor & BIOS from inside the OS ----------
+    def cmd_monitor(self, rest):
+        """Dual-pane terminal: TTY1 compute/tokens · TTY2 API audit (TRK-35)."""
+        parts = rest.split()
+        sub = parts[0].lower() if parts else "watch"
+        mon = self.monitor
+        if sub == "once":
+            print(mon.render())
+        elif sub == "log":
+            for name, lines in mon.tail_files(10).items():
+                print(c(f"── {name} log tail ──", BOLD))
+                for ln in lines:
+                    print("  " + ln.rstrip())
+        elif sub == "net":
+            self.cmd_nettrack(" ".join(parts[1:]))
+        elif sub == "watch":
+            secs = float(parts[1]) if len(parts) > 1 else 0.0
+            mon.watch(seconds=secs or None)
+        else:
+            print(c("Usage: /monitor [watch [sec]|once|log|net [sec]]",
+                    YELLOW))
+
+    def cmd_bios(self, rest):
+        """Suspend the kernel and open firmware setup (live GPU/RAM/SSD)."""
+        print(c("kernel: suspending ring-0, handing console to "
+                "TRUCK-FIRMWARE SETUP…", YELLOW))
+        self.kernel.enter_bios(self.sysconfig)
+        vhw = self._vhw()
+        print(c(f"  resumed. virtual hw now: RAM {vhw['ram_mb']}MiB · "
+                f"GPU {'on ' + str(vhw['gpu_vram_mb']) + 'MiB' if vhw['gpu_enabled'] else 'off'} · "
+                f"SSD {'on ' + str(vhw['ssd_gb']) + 'GiB' if vhw['ssd_enabled'] else 'off'}",
+                GREEN))
+
     def _shutdown(self):
         truck_init.shutdown()
         if self.api:
@@ -1212,11 +1613,15 @@ class App:
               + "\033[0m")
         print(BOLD + "  ├────────────────────────────────────────────┤"
               + "\033[0m")
-        print("  │   [1] Terminal         shell · trk · init  │")
-        print("  │   [2] LLM Local        local model factory     │")
-        print("  │   [3] Script Library   server-ops snippets     │")
-        print("  │   [4] Settings         system configuration    │")
-        print("  │   [0] Quit                                     │")
+        print("  │ [1] Terminal         shell · trk · init      │")
+        print("  │ [2] LLM Local        local model factory     │")
+        print("  │ [3] Script Library   server-ops snippets     │")
+        print("  │ [4] Settings         system configuration    │")
+        print("  │ [5] Вычисления       compute · quantize · zip │")
+        print("  │ [6] Сеть             dns · proxy · relay · vault │")
+        print("  │ [7] Монитор          live tokens + API audit  │")
+        print("  │ [8] BIOS             firmware setup (GPU/RAM) │")
+        print("  │ [0] Quit                                     │")
         print(BOLD + "  └────────────────────────────────────────────┘"
               + "\033[0m")
         try:
@@ -1233,8 +1638,137 @@ class App:
             return 3
         if line == "4":
             return 4
-        print(c("Invalid choice — enter 1, 2, 3, 4 or 0.", RED))
+        if line == "5":
+            self._menu_compute()
+            return 0
+        if line == "6":
+            self._menu_network()
+            return 0
+        if line == "7":
+            self.cmd_monitor("once")
+            input(DIM + "\n  press Enter to return to the menu…" + "\033[0m")
+            return 0
+        if line == "8":
+            self.cmd_bios("")
+            input(DIM + "\n  press Enter to return to the menu…" + "\033[0m")
+            return 0
+        print(c("Invalid choice — enter 1..8 or 0.", RED))
         return 0
+
+    # ---------- section submenus (main-menu entries 5 & 6) ----------
+    def _menu_compute(self):
+        """Interactive «Вычисления» hub inside the main menu."""
+        while True:
+            truck_shell.clear_screen()
+            s = self.compute.snapshot()
+            vhw = self._vhw()
+            print(c("  ═══ ВЫЧИСЛЕНИЯ · COMPUTE ═══", BOLD))
+            print(f"  mode={s['mode'].upper()} device={s['device']} | "
+                  f"jobs={s['jobs']} | RAM {vhw['ram_mb']}MiB · "
+                  f"GPU {'on' if vhw['gpu_enabled'] else 'off'} · "
+                  f"SSD {'on' if vhw['ssd_enabled'] else 'off'}")
+            print("  [1] status        [2] modes/info")
+            print("  [3] quantize file [4] compress file")
+            print("  [5] restore file  [6] journal log")
+            print("  [7] set active mode           [0] back")
+            try:
+                ch = input(c("  compute# ", CYAN)).strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                return
+            if ch in ("0", "back", "exit", ""):
+                return
+            if ch == "1":
+                self.cmd_compute("status")
+            elif ch == "2":
+                self.cmd_compute("modes")
+                name = input("  mode name (blank=list only): ").strip()
+                if name:
+                    self.cmd_compute("info " + name)
+            elif ch == "3":
+                self.cmd_quantize(self._ask("file path", "") + " " +
+                                  self._ask("format [q4_0]", "q4_0"))
+            elif ch == "4":
+                self.cmd_compress(self._ask("file path", ""))
+            elif ch == "5":
+                self.cmd_decompress(self._ask("container path", ""))
+            elif ch == "6":
+                self.cmd_compute("log 15")
+            elif ch == "7":
+                m = input("  new mode (auto/cpu/gpu/batch/realtime/"
+                          "cluster/energy/turbo/safe): ").strip().lower()
+                if compute_mod._norm_mode(m) == m:
+                    self.sysconfig.set("compute_mode", m)
+                    print(c(f"  compute_mode → {m.upper()}", GREEN))
+                else:
+                    print(c("  unknown mode", RED))
+            else:
+                print(c("  invalid choice", RED))
+            input(DIM + "\n  Enter to continue…" + "\033[0m")
+
+    def _menu_network(self):
+        """Interactive «Сеть» hub inside the main menu."""
+        while True:
+            truck_shell.clear_screen()
+            snap = self.netkit.snapshot()
+            print(c("  ═══ СЕТЬ · NETWORK (public-key first) ═══", BOLD))
+            print(f"  node key: {snap['identity']}")
+            print(f"  dns={snap['dns']} proxy={snap['proxy']} "
+                  f"relays={snap['relays_online']}/{snap['relays']} "
+                  f"vault={snap['vault']}")
+            print("  [1] overview     [2] DNS zone     [3] Proxy rules")
+            print("  [4] Relays       [5] File vault   [6] Live tracking")
+            print("  [7] Cluster links (how devices fuse)")
+            print("  [0] back")
+            try:
+                ch = input(c("  network# ", MAGENTA)).strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                return
+            if ch in ("0", "back", "exit", ""):
+                return
+            elif ch == "1":
+                self.cmd_network("")
+            elif ch == "2":
+                self.cmd_dns("list")
+                act = input("  add record? name value [A|CNAME] "
+                            "(blank=skip): ").strip()
+                if act:
+                    self.cmd_dns("add " + act)
+            elif ch == "3":
+                self.cmd_proxy("list")
+                act = input("  add rule? listen host:port [acls] "
+                            "(blank=skip): ").strip()
+                if act:
+                    self.cmd_proxy("add " + act)
+            elif ch == "4":
+                self.cmd_relay("list")
+                act = input("  add relay? host[:port] [pubkey] "
+                            "(blank=skip): ").strip()
+                if act:
+                    self.cmd_relay("add " + act)
+            elif ch == "5":
+                self.cmd_vault("list")
+                act = input("  put file? path [server] (blank=skip): ").strip()
+                if act:
+                    self.cmd_vault("put " + act)
+            elif ch == "6":
+                self.cmd_nettrack("")
+                return
+            elif ch == "7":
+                for k, v in cluster_mod.LINK_TYPES.items():
+                    print(f"  {k:<9} {v}")
+                p = self.cluster.pool()
+                print(c(f"  pool now: {p['nodes']} node(s), "
+                        f"{p['cpu']} CPU, {p['ram_mb']}MB RAM", CYAN))
+            else:
+                print(c("  invalid choice", RED))
+            input(DIM + "\n  Enter to continue…" + "\033[0m")
+
+    def _ask(self, prompt, default=""):
+        try:
+            v = input(c(f"  {prompt} [{default}]: ", GREEN)).strip()
+            return v or default
+        except (EOFError, KeyboardInterrupt):
+            return default
 
     # ---- LLM REPL (extracted from old run()) ----
     def repl_loop(self, prefix="servercloud", on_back=False):
@@ -1268,6 +1802,11 @@ class App:
                       "/cpts <SCA-key> [url] | /cptsm | /cptsuse <#> | "
                       "/cptslocal | /cptsdel <#> | "
                       "/agent [model] (coding agent) | "
+                      "/compute [status|modes|info|log] · /quantize <f> "
+                      "[fmt] · /compress <f> · /decompress <f> | "
+                      "/network · /dns · /proxy · /relay · /vault · "
+                      "/nettrack [sec] | "
+                      "/monitor [watch|once|log|net] · /bios (firmware) | "
                       "/status | /stop <job id> | back | quit")
             elif head == "/models":
                 self.cmd_models()
@@ -1339,6 +1878,30 @@ class App:
                 self.cmd_cptsdel(arg)
             elif head == "/agent":
                 self.cmd_agent(arg)
+            elif head == "/compute":
+                self.cmd_compute(arg)
+            elif head == "/quantize":
+                self.cmd_quantize(arg)
+            elif head == "/compress":
+                self.cmd_compress(arg)
+            elif head == "/decompress":
+                self.cmd_decompress(arg)
+            elif head == "/network":
+                self.cmd_network(arg)
+            elif head == "/dns":
+                self.cmd_dns(arg)
+            elif head == "/proxy":
+                self.cmd_proxy(arg)
+            elif head == "/relay":
+                self.cmd_relay(arg)
+            elif head == "/vault":
+                self.cmd_vault(arg)
+            elif head == "/nettrack":
+                self.cmd_nettrack(arg)
+            elif head == "/monitor":
+                self.cmd_monitor(arg)
+            elif head == "/bios":
+                self.cmd_bios(arg)
             elif head == "/trk":
                 self.trk_main(line.split()[1:])
             elif head == "/stop":
