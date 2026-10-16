@@ -1169,18 +1169,28 @@ class App:
             self.rescue_shell()
             return
         # ---- main TruckOS menu loop ----
+        # HARD SCREEN HYGIENE: the terminal is wiped before EVERY function
+        # and again before every return to the menu, so only one screen of
+        # content ever exists on the display (Termux included).
+        _menu_actions = {
+            1: lambda: truck_shell.terminal_shell(self),
+            2: self.llm_local_entry,
+            3: lambda: truck_shell.script_library_shell(self),
+            4: lambda: truck_shell.settings_shell(self),
+            5: self._menu_compute,
+            6: self._menu_network,
+            7: lambda: self.cmd_monitor("once"),
+            8: lambda: self.cmd_bios(""),
+        }
         while True:
-            choice = self.main_menu()
-            if choice is None:            # user quit
+            truck_shell.clear_screen()          # wipe menu → clean entry
+            choice = self.main_menu()               # clears + draws menu
+            if choice is None:                      # user quit
                 break
-            if choice == 1:
-                truck_shell.terminal_shell(self)
-            elif choice == 2:
-                self.llm_local_entry()
-            elif choice == 3:
-                truck_shell.script_library_shell(self)
-            elif choice == 4:
-                truck_shell.settings_shell(self)
+            action = _menu_actions.get(choice)
+            if action:
+                action()
+                truck_shell.clear_screen()          # wipe function → clean menu
         self._shutdown()
 
     # ---------- TruckOS helpers used by shells / menu ----------
@@ -1660,22 +1670,10 @@ class App:
             return 3
         if line == "4":
             return 4
-        if line == "5":
-            self._menu_compute()
-            return 0
-        if line == "6":
-            self._menu_network()
-            return 0
-        if line == "7":
-            self.cmd_monitor("once")
-            input(DIM + "\n  press Enter to return to the menu…" + "\033[0m")
-            return 0
-        if line == "8":
-            self.cmd_bios("")
-            input(DIM + "\n  press Enter to return to the menu…" + "\033[0m")
-            return 0
+        if line in ("5", "6", "7", "8"):
+            return int(line)
         print(c("Invalid choice — enter 1..8 or 0.", RED))
-        return 0
+        return None
 
     # ---------- section submenus (main-menu entries 5 & 6) ----------
     def _menu_compute(self):
@@ -1794,7 +1792,11 @@ class App:
 
     # ---- LLM REPL (extracted from old run()) ----
     def repl_loop(self, prefix="servercloud", on_back=False):
+        first_draw = True
         while True:
+            if first_draw:
+                truck_shell.clear_screen()          # clean entry into the REPL
+                first_draw = False
             try:
                 line = input(c(f"{prefix}> ", GREEN)).strip()
             except (EOFError, KeyboardInterrupt):

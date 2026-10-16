@@ -20,11 +20,18 @@ from servercloud.utils.colors import (c, GREEN, YELLOW, RED, CYAN,
 
 
 def clear_screen():
-    """ANSI clear-screen + home cursor; silently no-op on dumb terminals."""
+    """Wipe the terminal completely — works in Termux and every other TTY.
+
+    ANSI escape sequence is used directly (never curses: it repaints the old
+    screen on endwin, which looks like 'nothing was cleared'):
+      * \\033[3J — erase the SCROLLBACK buffer (Termux honours this),
+      * \\033[2J — erase the visible screen,
+      * \\033[H  — move cursor to home so new output starts at the top.
+    """
     if os.environ.get("TERM") == "dumb" or not sys.stdout.isatty():
         return
     try:
-        sys.stdout.write("\033[2J\033[H")
+        sys.stdout.write("\033[3J\033[2J\033[H")
         sys.stdout.flush()
     except Exception:                              # noqa: BLE001
         pass
