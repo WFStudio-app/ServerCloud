@@ -25,11 +25,23 @@ All knobs live in sysconfig (editable in BIOS setup / Settings):
 """
 
 import os
+import sys
 import threading
 import time
 
 from ..utils.colors import c, GREEN, YELLOW, RED, CYAN, MAGENTA, BOLD, DIM
 from .keycipher import TrkCipher, MASK_LEN
+
+
+def _clear_screen():
+    """ANSI clear+home (no-op on dumb/piped terminals) — Termux-friendly."""
+    if os.environ.get("TERM") == "dumb" or not sys.stdout.isatty():
+        return
+    try:
+        sys.stdout.write("\033[2J\033[H")
+        sys.stdout.flush()
+    except Exception:                              # noqa: BLE001
+        pass
 
 WIDTH_RATIO = 0.5          # left pane width fraction
 
@@ -215,7 +227,7 @@ class LiveMonitor:
                     break
                 if seconds is not None and time.time() - start > seconds:
                     break
-                os.system("cls" if os.name == "nt" else "clear")
+                _clear_screen()
                 print(self.render())
                 print(DIM + "  Ctrl-C stops the monitor" + "\033[0m")
                 time.sleep(refresh)

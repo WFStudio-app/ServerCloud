@@ -1225,6 +1225,20 @@ class App:
         print()
 
     # ---------- «Вычисления / COMPUTE» section ----------
+    # ---------- screen hygiene (Termux: only the active screen shows) ----------
+    def _cls(self):
+        """ANSI clear + home; no-op on dumb/piped terminals."""
+        truck_shell.clear_screen()
+
+    def _screen(self, title):
+        """Clear the terminal and print a compact section header.
+
+        Every command/sub-screen starts with this so Termux shows ONLY the
+        current function — nothing of the previous screen is left above it.
+        """
+        self._cls()
+        print(c(f"  ══ {title} ══", BOLD))
+
     def cmd_compute(self, rest):
         """Compute subsystem: modes, stats and live journal."""
         parts = rest.split()
@@ -1279,6 +1293,7 @@ class App:
             return ""
 
     def cmd_quantize(self, rest):
+        self._screen("ВЫЧИСЛЕНИЯ ▸ КВАНТОВАНИЕ ФАЙЛА")
         """Quantize a file's payload (q8_0/q4_0/q4_k/q3_k/q2_k/iq1)."""
         parts = rest.split()
         path = parts[0] if parts else self._path_or_input("")
@@ -1301,6 +1316,7 @@ class App:
             print(c(f"  quantize failed: {e}", RED))
 
     def cmd_compress(self, rest):
+        self._screen("ВЫЧИСЛЕНИЯ ▸ СЖАТИЕ ФАЙЛА")
         """Lossless TRKZ compression (RLE + zlib)."""
         parts = rest.split()
         path = parts[0] if parts else self._path_or_input("")
@@ -1317,6 +1333,7 @@ class App:
             print(c(f"  compress failed: {e}", RED))
 
     def cmd_decompress(self, rest):
+        self._screen("ВЫЧИСЛЕНИЯ ▸ ВОССТАНОВЛЕНИЕ ФАЙЛА")
         """Restore a .trkz / .qX container back to a plain file."""
         path = rest.split(maxsplit=1)[0] if rest else self._path_or_input("")
         if not path:
@@ -1333,6 +1350,7 @@ class App:
 
     # ---------- «Сеть / NETWORK» section ----------
     def cmd_network(self, rest):
+        self._screen("СЕТЬ · NETWORK")
         """Network overview: identity, services, counters."""
         nk = self.netkit
         s = nk.snapshot()
@@ -1357,6 +1375,7 @@ class App:
               "/monitor net" + "\033[0m")
 
     def cmd_dns(self, rest):
+        self._screen("СЕТЬ ▸ DNS")
         """Local signed DNS zone: add/del/lookup/list."""
         parts = rest.split()
         sub = parts[0].lower() if parts else "list"
@@ -1391,6 +1410,7 @@ class App:
                     "<name> | lookup <name> | list]", YELLOW))
 
     def cmd_proxy(self, rest):
+        self._screen("СЕТЬ ▸ PROXY")
         """Proxy rules: listen_port → upstream, with public-key ACL."""
         parts = rest.split()
         sub = parts[0].lower() if parts else "list"
@@ -1424,6 +1444,7 @@ class App:
                     "<port> | list]", YELLOW))
 
     def cmd_relay(self, rest):
+        self._screen("СЕТЬ ▸ RELAYS")
         """Route traffic through remote ServerCloud relay servers."""
         parts = rest.split()
         sub = parts[0].lower() if parts else "list"
@@ -1457,6 +1478,7 @@ class App:
                     "<host[:port]> | join <host[:port]> | list]", YELLOW))
 
     def cmd_vault(self, rest):
+        self._screen("СЕТЬ ▸ VAULT")
         """Store/verify files on servers; every object bound to a key."""
         parts = rest.split()
         sub = parts[0].lower() if parts else "list"

@@ -156,22 +156,47 @@ def _post(cfg):
     return ok
 
 
+# ---------------------------------------------------------------- BIOS setup
+# Screen redraw helper: ANSI clear + home, no-op on dumb/piped terminals.
+def _bios_clear():
+    if os.environ.get("TERM") == "dumb" or not sys.stdout.isatty():
+        return
+    try:
+        sys.stdout.write("\033[2J\033[H")
+        sys.stdout.flush()
+    except Exception:                              # noqa: BLE001
+        pass
+
+
 def bios_setup(cfg):
-    """The simulated UEFI setup screen ('BIOS').
+    """The simulated UEFI setup screen ('BIOS') — plain-text friendly.
 
     Reached from the bootloader menu (key `b`) or from a running TruckOS via
-    `/bios` / `reboot --bios`.  Fully interactive, everything editable here
-    is persisted straight into sysconfig.json.  The Advanced page tunes the
-    *virtual hardware* live: RAM size, vCPU count, iGPU (on/off + VRAM) and
-    SSD (on/off + capacity) — POST and the kernel honour these values on
-    the very next boot without any file editing.
+    `/bios` / `reboot --bios`.
+
+    UX design goals (Termux-safe):
+      * works with BOTH arrow keys and plain ASCII keys (8/2/4/6 or k/j/h/l)
+        — Termux's extra-dash row can send either;
+      * every setting has an explicit command: pick a line by number, then
+        press Enter to edit its value like a normal question, or use +/- to
+        nudge it, or type the new value directly;
+      * toggles flip with a single Enter press — no hidden modes;
+      * nothing is lost: changes are saved on Save&Exit (`s`), discarded on
+        Quit-without-saving (`q`);
+      * the whole screen clears before each redraw so only the BIOS is
+        visible — no leftover OS output above it.
+
+    Everything editable here persists straight into sysconfig.json.  The
+    Advanced page tunes the *virtual hardware* live: RAM size, vCPU count,
+    iGPU (on/off + VRAM) and SSD (on/off + capacity) — POST and the kernel
+    honour these values on the very next boot without any file editing.
     Returns: None (or runlevel string when the user picks 'Boot TruckOS').
     """
     order = list(cfg.get("boot_order") or DEFAULT_BOOT_ORDER)
     sel = 0
     page = 0                       # 0 = Main, 1 = Advanced (virtual HW)
     booted = None
-    dirty = True
+    dirty = False
 
     def save():
         cfg.set("kernel_ram_mb", ram[0])
@@ -215,82 +240,149 @@ def bios_setup(cfg):
         ("SSD capacity (GiB)", ssd, (1, 8192)),
     ]
     TOGGLE_VALS = (menu_en, quick, verbose, memtest, gpu_en, ssd_en)
-    PAGES = (("Main", MAIN_ITEMS), ("Advanced · Virtual Hardware", ADV_ITEMS))
+    PAGES = (("Main", MAIN_ITEMS),
+             ("Advanced \u00b7 Virtual Hardware", ADV_ITEMS))
+
+    def fmt_val(val):
+        v = val[0]
+        if any(val is t for t in TOGGLE_VALS):
+            return "[ Enabled ]" if v else "[ Disabled ]"
+        return f"[ {v} ]"
+
+    def read_line(prompt="  BIOS> "):
+        """Read one input line; returns None on EOF/Ctrl-C (= quit w/o save)."""
+        try:
+            return input(prompt).strip()
+        except (EOFError, KeyboardInterrupt):
+            return None
+
+    def ask_number(title, lo, hi, cur):
+        """Prompt for an integer inside [lo, hi]; Enter keeps current value."""
+        raw = read_line(f"    {title} ({lo}-{hi}, Enter={cur}): ")
+        if raw is None or raw == "":
+            return cur
+        try:
+            v = int(raw)
+        except ValueError:
+            print(f"    '{raw}' is not a number - keeping {cur}")
+            return cur
+        if not lo <= v <= hi:
+            print(f"    out of range {lo}-{hi} - clamped")
+            v = max(lo, min(hi, v))
+        return v
+
+    def edit_item(item):
+        """Open one setting: toggles flip instantly, numbers get a prompt."""
+        nonlocal dirty
+        label, val, rng = item
+        lo, hi = rng
+        if any(val is t for t in TOGGLE_VALS):
+            val[0] = 0 if val[0] else 1
+            dirty = True
+            print(f"    {label} -> {'Enabled' if val[0] else 'Disabled'}")
+            return
+        nv = ask_number(label, lo, hi, val[0])
+        if nv != val[0]:
+            val[0] = nv
+            dirty = True
+
+    def cycle_order():
+        nonlocal dirty
+        if len(order) > 1:
+            order.append(order.pop(0))
+            dirty = True
+        print("    boot order: " + " > ".join(order))
+
+    def render():
+        page_name, items = PAGES[page]
+        _bios_clear()
+        print("=========================================================")
+        print("   TRUCK-FIRMWARE SETUP UTILITY  (BIOS emulation v2.1)")
+        print("   TruckOS platform \u00b7 virtual hardware config")
+        print("=========================================================")
+        print(f"--- Page {page + 1}/{len(PAGES)}: {page_name} "
+              "(4/6 or h/l = switch page) ---")
+        for i, (label, val, _) in enumerate(items):
+            mark = ">" if i == sel else " "
+            print(f"  {mark}{i + 1:>2}. {label:<38}{fmt_val(val)}")
+        if page == 0:
+            print("--- Boot priority (press o to cycle first device) ---")
+            for j, dev in enumerate(order):
+                print(f"    {j + 1}. {dev}")
+        print("---------------------------------------------------------")
+        print("  Up/Down (8/2 or k/j): move selection  Enter: edit selected")
+        print("  +/-: nudge value    number: jump to & edit that line")
+        print("  o: boot order       s: SAVE & exit      q: exit w/o saving")
+        print("  b: boot TruckOS now (saves first)")
+        print("---------------------------------------------------------")
+        if dirty:
+            print("  (unsaved changes - press s to save)")
 
     while True:
-        page_name, items = PAGES[page]
-        os.system("cls" if os.name == "nt" else "clear")
-        print("┌───────────────── TRUCK-FIRMWARE SETUP UTILITIES ─────────────────┐")
-        print("│  AMI-style BIOS emulation · TruckOS platform                     │")
-        print(f"├────────────────────── {page_name}{' ' * (32 - len(page_name))}─────────────────────────────────┤")
-        for i, (label, val, _) in enumerate(items):
-            mark = "▶" if i == sel else " "
-            v = val[0]
-            if any(val is t for t in TOGGLE_VALS):
-                v = "Enabled" if v else "Disabled"
-            print(f"│ {mark} {i+1:>2}. {label:<42} : {v:<8}        │")
-        if page == 0:
-            print("├──────────────────────── Boot priority ───────────────────────────┤")
-            for j, dev in enumerate(order):
-                print(f"│     {j+1}. {dev:<56} │")
-        print("├────────────────────────────────────────────────────────────────────┤")
-        print("│  ↑/↓ or number: select · +/-: change value · o: cycle boot order   │")
-        print("│  ←/→ or Tab: switch page · F10/s: save & exit · Esc: discard       │")
-        print("│  B: boot TruckOS now                                               │")
-        print("└────────────────────────────────────────────────────────────────────┘")
+        _, items = PAGES[page]
+        render()
         if not sys.stdin.isatty():
-            save()
+            save()                          # headless/CI: persist defaults
             return None
-        try:
-            key = _getch()()
-        except OSError:
-            save()
+        raw = read_line()
+        if raw is None:                     # Ctrl-C / EOF -> quit w/o save
             return None
-        if key == "\x1b":                       # Esc — discard
-            break
-        if key in ("\r", "\n"):
+        cmd = raw.strip().lower()
+        if cmd == "":                       # bare Enter -> edit selected line
+            edit_item(PAGES[page][1][sel])
             continue
-        if key.lower() == "f":                  # some terminals send F10 as esc-seq
+        if len(cmd) == 1:
+            ch = cmd
+            if ch in ("8", "k"):
+                sel = (sel - 1) % len(items)
+                continue
+            if ch in ("2", "j"):
+                sel = (sel + 1) % len(items)
+                continue
+            if ch in ("4", "h"):
+                page = (page - 1) % len(PAGES)
+                sel = min(sel, len(PAGES[page][1]) - 1)
+                continue
+            if ch in ("6", "l"):
+                page = (page + 1) % len(PAGES)
+                sel = min(sel, len(PAGES[page][1]) - 1)
+                continue
+            if ch == "s":
+                save()
+                return None
+            if ch == "q":
+                return None
+            if ch == "b":
+                save()
+                booted = "default"
+                break
+            if ch == "o" and page == 0:
+                cycle_order()
+                continue
+            if ch in ("+", "="):
+                _, val, (_, hi) = items[sel]
+                if any(val is t for t in TOGGLE_VALS):
+                    val[0] = 1
+                else:
+                    val[0] = min(val[0] + 1, hi)
+                dirty = True
+                continue
+            if ch in ("-", "_"):
+                _, val, (lo, _) = items[sel]
+                if any(val is t for t in TOGGLE_VALS):
+                    val[0] = 0
+                else:
+                    val[0] = max(val[0] - 1, lo)
+                dirty = True
+                continue
+        if cmd.isdigit() and 1 <= int(cmd) <= len(items):
+            sel = int(cmd) - 1
+            edit_item(items[sel])
             continue
-        if key == "\x1b[A":
-            sel = (sel - 1) % len(items)
-            continue
-        if key == "\x1b[B":
-            sel = (sel + 1) % len(items)
-            continue
-        if key in ("\x1b[C", "\t"):             # right / Tab → next page
-            page = (page + 1) % len(PAGES)
-            sel = min(sel, len(PAGES[page][1]) - 1)
-            continue
-        if key == "\x1b[D":                     # left → previous page
-            page = (page - 1) % len(PAGES)
-            sel = min(sel, len(PAGES[page][1]) - 1)
-            continue
-        low = key.lower()
-        if low == "b":
-            save()
-            booted = "default"
-            break
-        if low == "o" and page == 0:
-            order.insert(0, order.pop(1 if len(order) > 1 else 0))
-            dirty = True
-            continue
-        if key.isdigit() and 1 <= int(key) <= len(items):
-            sel = int(key) - 1
-            continue
-        _, val, (lo_b, hi_b) = items[sel]
-        if key in ("+", "="):
-            step = 1 if hi_b - lo_b < 100 else (16 if val in (ram, vram) else 8)
-            val[0] = min(val[0] + step, hi_b)
-            dirty = True
-        elif key in ("-", "_"):
-            step = 1 if hi_b - lo_b < 100 else (16 if val in (ram, vram) else 8)
-            val[0] = max(val[0] - step, lo_b)
-            dirty = True
-        elif key == "\x04" or low == "s":       # Ctrl-D / s → save & exit
-            save()
-            break
-    if dirty and booted:
+        print(f"  unknown command '{raw}'  (Enter=edit, s=save, q=quit,"
+              f" b=boot, 8/2=move)")
+
+    if booted:
         save()
     return booted
 
