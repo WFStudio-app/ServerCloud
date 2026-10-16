@@ -48,7 +48,7 @@ EOF
 cp /etc/apk/keys/*.pub "${ROOTFS}/etc/apk/keys/" 2>/dev/null || true
 
 PKGS="python3 py3-pip openrc shadow curl git bash"
-COMMUNITY_PKGS="community/busybox-initscripts"
+COMMUNITY_PKGS=""
 [ "$MINIMAL" = 1 ] && PKGS="python3 openrc"
 $SUDO apk --root "${ROOTFS}" add --no-cache $PKGS $COMMUNITY_PKGS
 
