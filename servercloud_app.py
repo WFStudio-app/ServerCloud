@@ -1363,8 +1363,10 @@ class App:
     def cmd_sslgen(self, rest):
         """«Генерация ССЛ» compute mode — one-line &&-joined spec.
 
-        Usage: /sslgen len=<N> && charset=<letters|digits|mixed> && lines=<1..1e12>
-        Example: /sslgen len=16 && charset=mixed && lines=1000000
+        Usage: /sslgen len=<N> && charset=<letters|digits|mixed> && lines=<1..1e12> [&& format=txt] [&& file=/path]
+        Example: /sslgen len=16 && charset=mixed && lines=1000000 && format=json
+        Live feed shows every line the script writes:  [OK] <code> -> <file>:<line>
+        and rejects it could not verify:               [!] <code> -> skipped (...)
         """
         self._screen("ВЫЧИСЛЕНИЯ ▸ ГЕНЕРАЦИЯ ССЛ")
         spec = rest.strip()
@@ -1375,8 +1377,15 @@ class App:
             print("    charset=<letters|digits|mixed>  "
                   "(буквы / только цифры / буквы+цифры)")
             print("    lines=<кол-во строк>  (от 1 до 1 трлн за раз)")
+            print("    format=<формат файла>   (необязательно, по умолчанию txt)")
+            print("    file=<путь/файл>        (необязательно)")
+            try:
+                fmts = ", ".join(compute_mod.sslgen_format_names())
+            except Exception:                    # noqa: BLE001
+                fmts = "txt, csv, json, yaml, xml, ..."
+            print(DIM + f"      форматы: {fmts}" + "\033[0m")
             print(DIM + "  пример: /sslgen len=16 && charset=mixed "
-                  "&& lines=1000000" + "\033[0m")
+                  "&& lines=1000000 && format=json" + "\033[0m")
             try:
                 spec = input(c("  spec> ", CYAN)).strip()
             except (EOFError, KeyboardInterrupt):
@@ -1389,21 +1398,51 @@ class App:
         except ValueError as e:
             print(c(f"  bad spec: {e}", RED))
             return
+        fmt = p.get("fmt", "txt")
+        ext = compute_mod.SSL_OUTPUT_FORMATS.get(fmt, ".txt")
+        dst = p.get("path") or os.path.join(
+            str(DATA_DIR),
+            f"sslgen_{time.strftime('%Y%m%d_%H%M%S')}{ext}")
         est = p["length"] * p["lines"] + p["lines"]
         print(c(f"  plan: len={p['length']} charset={p['charset']} "
-                f"lines={p['lines']:,} (~{est:,} bytes)", YELLOW))
+                f"lines={p['lines']:,} format={fmt} → {dst} "
+                f"(~{est:,} bytes)", YELLOW))
         if p["lines"] > 1_000_000:
             print(DIM + "  large run — Ctrl-C aborts and keeps what was "
                   "written so far" + "\033[0m")
+
+        # live per-line verification feed: [OK] code -> file:line / [!] skip
+        state = {"shown": 0, "ok": 0, "bad": 0}
+        cap = 60                      # max live rows on screen per run
+
+        def _feed(msg):
+            if msg.startswith("[OK]"):
+                state["ok"] += 1
+            else:
+                state["bad"] += 1
+            if state["shown"] < cap:
+                state["shown"] += 1
+                col = GREEN if msg.startswith("[OK]") else RED
+                print(c("    " + msg, col))
+            elif state["shown"] == cap:
+                state["shown"] += 1
+                print(c("    ... feed continues in background "
+                        "(rows after 60 are counted only)", DIM))
+
         try:
-            res = self.compute.sslgen_generate(spec)
+            res = self.compute.sslgen_generate(spec, dst=dst,
+                                               line_logger=_feed)
         except (ValueError, RuntimeError) as e:
             print(c(f"  sslgen failed: {e}", RED))
             return
         flag = " ⚠ aborted early" if res["aborted"] else ""
-        print(c(f"  ✔ generated {res['generated']:,} line(s) of "
-                f"{res['length']} chars ({res['charset']}) in "
-                f"{res['ms']:.0f} ms → {res['path']}{flag}", GREEN))
+        print(c(f"  ✔ verified & written {res['generated']:,}/"
+                f"{res['requested']:,} line(s) of {res['length']} chars "
+                f"({res['charset']}, {res['format']}) in {res['ms']:.0f} ms "
+                f"→ {res['path']}{flag}", GREEN))
+        if res.get("rejected"):
+            print(c(f"  ✖ rejected by self-check: {res['rejected']:,} "
+                    f"(not written to file)", RED))
         for ln in res["preview"]:
             print("    " + ln)
 
