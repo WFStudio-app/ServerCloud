@@ -1411,23 +1411,19 @@ class App:
             print(DIM + "  large run — Ctrl-C aborts and keeps what was "
                   "written so far" + "\033[0m")
 
-        # live per-line verification feed: [OK] code -> file:line / [!] skip
-        state = {"shown": 0, "ok": 0, "bad": 0}
-        cap = 60                      # max live rows on screen per run
+        # live per-line verification feed: EVERY generated line is shown
+        # as it happens — [OK] code -> file:line / [!] skipped.  Nothing
+        # is truncated; the run itself is paced (~1 minute for >=1000
+        # lines by default) so the terminal stays readable.
+        state = {"ok": 0, "bad": 0}
 
         def _feed(msg):
             if msg.startswith("[OK]"):
                 state["ok"] += 1
+                print(c("    " + msg, GREEN))
             else:
                 state["bad"] += 1
-            if state["shown"] < cap:
-                state["shown"] += 1
-                col = GREEN if msg.startswith("[OK]") else RED
-                print(c("    " + msg, col))
-            elif state["shown"] == cap:
-                state["shown"] += 1
-                print(c("    ... feed continues in background "
-                        "(rows after 60 are counted only)", DIM))
+                print(c("    " + msg, RED))
 
         try:
             res = self.compute.sslgen_generate(spec, dst=dst,

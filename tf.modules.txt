@@ -52,4 +52,7 @@ Full suite: 91 passed
 
 [SSLGEN] «Генерация ССЛ» — compute mode (servercloud/modules/compute.py)
   spec: len=<N> && charset=<letters|digits|mixed> && lines=<1..1e12>
+        [&& format=txt|csv|json|...] [&& file=/path] [&& rate=<lines/s>] [&& duration=<sec>]
+  live feed: EVERY line printed as [OK] code -> file:line / [!] skipped (self-check)
+  pacing: runs of >=1000 lines stretch over ~60s by default (override via rate/duration)
   CLI:  /sslgen <spec> · menu [5] -> [8]; streams to ~/.servercloud/sslgen_*.txt

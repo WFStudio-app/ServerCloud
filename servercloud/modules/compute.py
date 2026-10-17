@@ -306,9 +306,29 @@ def parse_sslgen_spec(spec):
         raise ValueError(f"format must be one of: "
                          f"{', '.join(sslgen_format_names())}")
     path = _pick("file", "path", "dst", "to")
+    # optional pacing: rate=<lines/sec> or duration=<seconds>; default is
+    # auto (>=1000 lines -> stretch the live feed over ~60 seconds)
+    rv = _pick("rate", "speed", "rps")
+    dv = _pick("duration", "time", "dur")
+    rate = None
+    if dv is not None:
+        try:
+            dur = float(dv)
+        except ValueError:
+            raise ValueError("duration must be a number of seconds") from None
+        if dur <= 0:
+            raise ValueError("duration must be > 0 seconds")
+        rate = max(1.0, lines / dur)
+    elif rv is not None:
+        try:
+            rate = float(rv)
+        except ValueError:
+            raise ValueError("rate must be a number (lines per second)") from None
+        if rate <= 0:
+            raise ValueError("rate must be > 0 lines/second")
     return {"length": length, "lines": lines,
             "charset": kind, "alphabet": alphabet,
-            "fmt": fmt, "path": path}
+            "fmt": fmt, "path": path, "rate": rate}
 
 # quantization formats: name -> (block size, bits kept, human label)
 QUANT_FORMATS = {
@@ -591,6 +611,20 @@ class ComputeEngine:
                 self.data_dir,
                 f"sslgen_{time.strftime('%Y%m%d_%H%M%S')}{ext}")
         t0 = time.perf_counter()
+        # ---- pacing: every line is printed to the live feed as it is
+        # generated.  For runs of >=1000 lines the feed is stretched over
+        # ~60 seconds by default (rate=<lines/sec> or duration=<sec> in the
+        # spec overrides this).  Huge runs (millions of lines) are capped
+        # at a readable upper rate so they still finish in reasonable time.
+        AUTO_PACE_MIN_LINES = 1000
+        AUTO_PACE_SECONDS = 60.0
+        MAX_AUTO_RATE = 2000.0            # never faster than 2000 lines/s
+        rate = p.get("rate")
+        if rate is None:
+            if lines >= AUTO_PACE_MIN_LINES:
+                rate = min(max(lines / AUTO_PACE_SECONDS, 1.0), MAX_AUTO_RATE)
+            else:
+                rate = float("inf")       # instant for small runs
         block_n = max(1, min(lines, 8192))          # stream in small blocks
         written = 0                                 # lines in the file
         attempted = 0                               # generated (incl. rejects)
@@ -599,8 +633,17 @@ class ComputeEngine:
         stop = self.sslgen_stop or (lambda: False)
         aset = set(alphabet)
         writer = _SslgenWriter(dst, fmt)
+
+        def _pace(elapsed_s, done_n):
+            """Sleep so that `done_n` lines land exactly at elapsed_s."""
+            target = done_n / rate
+            remain = target - (time.perf_counter() - t0 - elapsed_base)
+            if remain > 0:
+                time.sleep(min(remain, 0.5))
+
         try:
             writer.open()
+            elapsed_base = 0.0
             while written < lines:
                 if stop():
                     break
@@ -628,6 +671,8 @@ class ComputeEngine:
                             pass
                     if len(preview_lines) < preview:
                         preview_lines.append(s)
+                    if rate != float("inf"):
+                        _pace(elapsed_base, written)
                 if progress_cb:
                     try:
                         progress_cb(written, lines)
